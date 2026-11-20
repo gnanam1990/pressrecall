@@ -21,6 +21,19 @@ import {
   upsertRedirect,
 } from "../services/planner.js";
 import { createResolver, type RedirectPolicy } from "../services/fetcher.js";
+import {
+  approvalEligible,
+  approvalView,
+  createApproval,
+  createQuoteRequest,
+  getQuote,
+  quoteView,
+  submitQuote,
+  uploadProof,
+  type QuoteRequestRow,
+  type QuoteRow,
+  type ApprovalRow,
+} from "../services/quotes.js";
 
 export interface AppContext {
   objectDir: string;
@@ -339,6 +352,162 @@ export function buildRoutes(app: AppContext): Route[] {
       },
     },
     {
+      method: "POST",
+      pattern: "/api/campaigns/:id/quote-requests",
+      roles: ["buyer", "agent"],
+      scope: "quotes:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const row = createQuoteRequest(db, actor!, params.id!, {
+          planItemId: String(b.planItemId ?? ""),
+          revisionId: String(b.revisionId ?? ""),
+          dimensions: String(b.dimensions ?? ""),
+          deadline: b.deadline ? String(b.deadline) : undefined,
+          qty: typeof b.qty === "number" ? b.qty : undefined,
+        });
+        return { status: 201, body: quoteRequestView(row) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/quote-requests",
+      roles: ["buyer", "agent", "coordinator"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM quote_requests WHERE campaign_id = ? ORDER BY created_at"
+          )
+          .all(params.id!) as unknown as QuoteRequestRow[];
+        return { body: { quoteRequests: rows.map(quoteRequestView) } };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/printer/quote-requests",
+      roles: ["printer"],
+      scope: "jobs:read",
+      handler: ({ db }) => {
+        const rows = db
+          .prepare(
+            "SELECT * FROM quote_requests WHERE status = 'OPEN' ORDER BY created_at"
+          )
+          .all() as unknown as QuoteRequestRow[];
+        return { body: { quoteRequests: rows.map(quoteRequestView) } };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/printer/quote-requests/:qrid/quotes",
+      roles: ["printer"],
+      scope: "quotes:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const q = submitQuote(db, actor!, params.qrid!, {
+          qty: Number(b.qty ?? 0),
+          priceAtoms: Number(b.priceAtoms ?? -1),
+          token: String(b.token ?? ""),
+          network: b.network ? String(b.network) : undefined,
+          recipient: String(b.recipient ?? ""),
+          expiresAt: String(b.expiresAt ?? ""),
+          direction: b.direction ? String(b.direction) : undefined,
+        });
+        return { status: 201, body: quoteView(q) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/printer/quote-requests/:qrid/proofs",
+      roles: ["printer"],
+      scope: "proofs:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const p = uploadProof(db, actor!, app.objectDir, params.qrid!, {
+          assetText: b.assetText !== undefined ? String(b.assetText) : undefined,
+          assetBase64:
+            b.assetBase64 !== undefined ? String(b.assetBase64) : undefined,
+        });
+        return {
+          status: 201,
+          body: {
+            id: p.id,
+            quoteRequestId: p.quote_request_id,
+            printerId: p.printer_id,
+            revisionId: p.revision_id,
+            proofDigest: p.proof_digest,
+            createdAt: p.created_at,
+          },
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/printer/quotes",
+      roles: ["printer"],
+      scope: "quotes:read",
+      handler: ({ db, actor }) => {
+        const rows = db
+          .prepare(
+            "SELECT * FROM quotes WHERE printer_id = ? ORDER BY created_at"
+          )
+          .all(actor!.printerId) as unknown as QuoteRow[];
+        return { body: { quotes: rows.map(quoteView) } };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/quotes",
+      roles: ["buyer", "agent"],
+      scope: "quotes:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM quotes WHERE campaign_id = ? ORDER BY created_at"
+          )
+          .all(params.id!) as unknown as QuoteRow[];
+        return { body: { quotes: rows.map(quoteView) } };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/campaigns/:id/approvals",
+      roles: ["buyer"],
+      scope: "approvals:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const a = createApproval(db, actor!, params.id!, {
+          quoteId: String(b.quoteId ?? ""),
+          proofId: String(b.proofId ?? ""),
+        });
+        const q = getQuote(db, params.id!, a.quote_id);
+        return { status: 201, body: approvalView(a, q) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/approvals",
+      roles: ["buyer", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM approvals WHERE campaign_id = ? ORDER BY created_at"
+          )
+          .all(params.id!) as unknown as ApprovalRow[];
+        return {
+          body: {
+            approvals: rows.map((a) => ({
+              ...approvalView(a, getQuote(db, params.id!, a.quote_id)),
+              eligibility: approvalEligible(db, a),
+            })),
+          },
+        };
+      },
+    },
+    {
       // Demo operator redirector: serves the managed destination as a real
       // HTTP 302 — the honest local stand-in for the operator's deployed
       // redirect service that an installed QR actually resolves.
@@ -396,6 +565,21 @@ export function buildRoutes(app: AppContext): Route[] {
 
 function numOr(v: unknown): number | undefined {
   return typeof v === "number" ? v : undefined;
+}
+
+function quoteRequestView(q: QuoteRequestRow): Record<string, unknown> {
+  return {
+    id: q.id,
+    campaignId: q.campaign_id,
+    planItemId: q.plan_item_id,
+    revisionId: q.revision_id,
+    dimensions: q.dimensions,
+    deadline: q.deadline,
+    qty: q.qty,
+    status: q.status,
+    createdBy: q.created_by,
+    createdAt: q.created_at,
+  };
 }
 
 function campaignView(c: {
