@@ -3,10 +3,11 @@ import assert from "node:assert/strict";
 import { startApp, api, pipeline, ACTORS } from "./helpers.js";
 
 /**
- * T-012 — Team-funded transfers are excluded from independent-usage
- * attribution, and the public bundle strips EXIF/contact/private fields.
+ * T-012 — Attribution is ledger-aware: sandbox spends never prove
+ * independent use (a fundedBy label alone is claimed, not evidence), and
+ * the public bundle strips EXIF/contact/private fields.
  */
-test("T-012: attribution separates team vs external; public bundle is redacted", async () => {
+test("T-012: sandbox attribution is claimed not proven; public bundle is redacted", async () => {
   const app = await startApp();
   const buyer = ACTORS.buyer.id;
   const coord = ACTORS.coordinator.id;
@@ -41,13 +42,20 @@ test("T-012: attribution separates team vs external; public bundle is redacted",
     const relExt = await api(app, buyer, "POST", `/api/campaigns/${ext.cid}/release`);
     assert.equal(relExt.status, 201);
     const r = relExt.json.report;
-    // Independent usage counts only non-team spend.
-    assert.equal(r.attribution.independentAtoms, 42000);
+    // The spend carried fundedBy 'external' but settled on the SANDBOX
+    // ledger — a buyer label cannot prove independent use.
+    assert.equal(r.attribution.independentAtoms, 0);
+    assert.equal(r.attribution.claimedIndependentAtoms, 42000);
     assert.equal(r.attribution.teamFundedAtoms, 0);
+    assert.equal(r.attribution.evidenceClass, "SANDBOX_ONLY");
+    assert.equal(r.costs.sandboxSettledAtoms, 42000);
+    assert.equal(r.costs.liveSettledAtoms, 0);
 
     const relTeam = await api(app, buyer, "POST", `/api/campaigns/${team.cid}/release`);
     assert.equal(relTeam.json.report.attribution.independentAtoms, 0);
+    assert.equal(relTeam.json.report.attribution.claimedIndependentAtoms, 0);
     assert.equal(relTeam.json.report.attribution.teamFundedAtoms, 43000);
+    assert.equal(relTeam.json.report.attribution.evidenceClass, "SANDBOX_ONLY");
 
     // Public bundle must not contain EXIF, notes, labels, contacts or
     // uploader identities — only digests, codes, states, aggregates.

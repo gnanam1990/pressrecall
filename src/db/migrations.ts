@@ -350,4 +350,9 @@ CREATE TABLE releases (
 );
 `,
   },
+  {
+    version: 10,
+    name: "release-public-snapshot",
+    sql: `ALTER TABLE releases ADD COLUMN public_report TEXT;`,
+  },
 ];

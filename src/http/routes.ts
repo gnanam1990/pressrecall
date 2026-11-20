@@ -896,9 +896,13 @@ export function buildRoutes(app: AppContext): Route[] {
       scope: "release:read",
       handler: ({ db, actor, params, body }) => {
         const b = (body ?? {}) as Record<string, unknown>;
-        const { release, report } = releaseCampaign(db, actor!, params.id!, {
-          allowExceptions: b.allowExceptions === true,
-        });
+        const { release, report } = releaseCampaign(
+          db,
+          actor!,
+          params.id!,
+          app.chain.label,
+          { allowExceptions: b.allowExceptions === true }
+        );
         return {
           status: 201,
           body: {
@@ -918,7 +922,9 @@ export function buildRoutes(app: AppContext): Route[] {
       scope: "release:read",
       handler: ({ db, actor, params }) => {
         getCampaign(db, actor!, params.id!);
-        return { body: buildReport(db, params.id!, "private") };
+        return {
+          body: buildReport(db, params.id!, "private", app.chain.label),
+        };
       },
     },
     {

@@ -12,9 +12,13 @@ interface ReleaseRow {
   public_token: string;
   status: string;
   report: string;
+  public_report: string | null;
   released_by: string;
   created_at: string;
 }
+
+const isSandboxLedger = (label: string | null | undefined): boolean =>
+  !label || label.startsWith("SANDBOX");
 
 interface PlacementLite {
   id: string;
@@ -73,11 +77,17 @@ function verifyPayments(db: Db, campaignId: string) {
  * Acceptance report. `audience: 'public'` strips private detail: contact
  * fields, uploader identities, evidence notes/paths, site labels, session
  * ids — keeping digests, codes, states, tx hashes and aggregates.
+ *
+ * `ledgerLabel` is the configured adapter's identity — never hardcoded.
+ * Attribution is ledger-aware: a spend marked fundedBy 'external' on a
+ * SANDBOX ledger is a buyer label only — it cannot prove independent use
+ * and is counted separately, not as adoption.
  */
 export function buildReport(
   db: Db,
   campaignId: string,
-  audience: "public" | "private"
+  audience: "public" | "private",
+  ledgerLabel: string
 ): Record<string, unknown> {
   const campaign = db
     .prepare("SELECT * FROM campaigns WHERE id = ?")
@@ -141,10 +151,19 @@ export function buildReport(
 
   const confirmed = payments.filter((p) => p.status === "CONFIRMED");
   const settledAtoms = confirmed.reduce((a, p) => a + p.amountAtoms, 0);
-  const independentAtoms = confirmed
+  const live = confirmed.filter((p) => !isSandboxLedger(p.ledger));
+  const sandbox = confirmed.filter((p) => isSandboxLedger(p.ledger));
+  const liveSettledAtoms = live.reduce((a, p) => a + p.amountAtoms, 0);
+  const sandboxSettledAtoms = sandbox.reduce((a, p) => a + p.amountAtoms, 0);
+  // Independent usage requires BOTH a live ledger AND non-team funding.
+  // A buyer-applied 'external' label on sandbox rows is claimed, not proven.
+  const independentAtoms = live
     .filter((p) => p.fundedBy !== "team")
     .reduce((a, p) => a + p.amountAtoms, 0);
-  const teamFundedAtoms = settledAtoms - independentAtoms;
+  const claimedIndependentAtoms = sandbox
+    .filter((p) => p.fundedBy !== "team")
+    .reduce((a, p) => a + p.amountAtoms, 0);
+  const teamFundedAtoms = settledAtoms - independentAtoms - claimedIndependentAtoms;
 
   const counts = {
     sitesTotal: placements.length,
@@ -201,13 +220,15 @@ export function buildReport(
     name: campaign.name,
     state: campaign.status,
     generatedAt: nowIso(),
-    ledger: "SANDBOX",
+    ledger: ledgerLabel,
     budget: {
       capAtoms: campaign.budget_cap_atoms,
       token: campaign.budget_token,
     },
     costs: {
       settledAtoms,
+      sandboxSettledAtoms,
+      liveSettledAtoms,
       committedAtoms: intents
         .filter((i) => i.state !== "DISPUTED")
         .reduce((a, i) => a + i.amount_atoms, 0),
@@ -215,8 +236,15 @@ export function buildReport(
     },
     attribution: {
       independentAtoms,
+      claimedIndependentAtoms,
       teamFundedAtoms,
-      note: "team-funded transfers are excluded from independent usage",
+      evidenceClass:
+        liveSettledAtoms > 0
+          ? "LIVE"
+          : sandboxSettledAtoms > 0
+            ? "SANDBOX_ONLY"
+            : "NONE",
+      note: "independent usage requires a live ledger plus non-team funding; sandbox rows are labeled, not proven",
     },
     counts,
     avoidedUnits,
@@ -236,6 +264,7 @@ export function releaseCampaign(
   db: Db,
   actor: Actor,
   campaignId: string,
+  ledgerLabel: string,
   input: { allowExceptions?: boolean }
 ): { release: ReleaseRow; report: Record<string, unknown> } {
   getCampaign(db, actor, campaignId);
@@ -245,30 +274,53 @@ export function releaseCampaign(
   if (existing) {
     return { release: existing, report: JSON.parse(existing.report) };
   }
-  const report = buildReport(db, campaignId, "private");
+  const report = buildReport(db, campaignId, "private", ledgerLabel);
+  const counts = report.counts as { sitesTotal: number };
+  if (counts.sitesTotal === 0) {
+    throw conflict("campaign has no sites — nothing to release");
+  }
   const unresolved = (report.unresolved as string[]).length;
   const exceptions = report.exceptions as unknown[];
-  if (unresolved > 0 && !input.allowExceptions) {
+  if ((unresolved > 0 || exceptions.length > 0) && !input.allowExceptions) {
     throw conflict(
-      `${unresolved} site(s) unresolved — publish with allowExceptions to release as CLOSED_WITH_EXCEPTIONS`
+      `${unresolved} unresolved site(s) and ${exceptions.length} exception(s) — release requires explicit exception signoff (allowExceptions)`
     );
   }
   const status =
     unresolved === 0 && exceptions.length === 0 ? "VERIFIED" : "CLOSED_WITH_EXCEPTIONS";
-  db.prepare("UPDATE campaigns SET status = ? WHERE id = ?").run(status, campaignId);
+  // Snapshots carry the POST-transition status and are persisted atomically
+  // with the campaign transition; the public bundle never recomputes.
+  report.state = status;
+  const publicSnapshot = {
+    ...buildReport(db, campaignId, "public", ledgerLabel),
+    state: status,
+    redaction:
+      "PUBLIC: no site labels, contacts, uploader ids, evidence notes/paths or session material",
+  };
+
   const id = newId("rel");
-  db.prepare(
-    `INSERT INTO releases (id, campaign_id, public_token, status, report, released_by, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    id,
-    campaignId,
-    `pub_${newId("").replace(/[^a-z0-9]/gi, "")}${Math.random().toString(36).slice(2, 14)}`,
-    status,
-    JSON.stringify(report),
-    actor.id,
-    nowIso()
-  );
+  const publicToken = `pub_${newId("").replace(/[^a-z0-9]/gi, "")}${Math.random().toString(36).slice(2, 14)}`;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE campaigns SET status = ? WHERE id = ?").run(status, campaignId);
+    db.prepare(
+      `INSERT INTO releases (id, campaign_id, public_token, status, report, public_report, released_by, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      id,
+      campaignId,
+      publicToken,
+      status,
+      JSON.stringify(report),
+      JSON.stringify(publicSnapshot),
+      actor.id,
+      nowIso()
+    );
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
   emit(db, {
     type: "release.published",
     campaignId,
@@ -283,16 +335,19 @@ export function releaseCampaign(
   return { release, report };
 }
 
+/**
+ * Serve the persisted public snapshot — immutable at publication. The
+ * bundle does NOT recompute live data, so post-release state changes can
+ * never silently alter what was shared with the client.
+ */
 export function publicBundle(db: Db, publicToken: string): Record<string, unknown> | null {
   const release = db
     .prepare("SELECT * FROM releases WHERE public_token = ?")
     .get(publicToken) as ReleaseRow | undefined;
   if (!release) return null;
-  const bundle = buildReport(db, release.campaign_id, "public");
-  return {
-    ...bundle,
-    releasedAt: release.created_at,
-    status: release.status,
-    redaction: "PUBLIC: no site labels, contacts, uploader ids, evidence notes/paths or session material",
-  };
+  const snapshot = JSON.parse(release.public_report ?? release.report) as Record<
+    string,
+    unknown
+  >;
+  return { ...snapshot, releasedAt: release.created_at, status: release.status };
 }
