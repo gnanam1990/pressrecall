@@ -21,6 +21,21 @@ import {
   upsertRedirect,
 } from "../services/planner.js";
 import { createResolver, type RedirectPolicy } from "../services/fetcher.js";
+import type { SignerAdapter } from "../chain/adapter.js";
+import {
+  createGrant,
+  createOrderIntent,
+  executeIntent,
+  grantView,
+  intentView,
+  reconcileSpend,
+  reserveIntent,
+  revokeGrant,
+  spendView,
+  type GrantRow,
+  type IntentRow,
+  type SpendRow,
+} from "../services/settlement.js";
 import {
   approvalEligible,
   approvalView,
@@ -37,6 +52,7 @@ import {
 
 export interface AppContext {
   objectDir: string;
+  chain: SignerAdapter;
   redirectPolicy?: RedirectPolicy;
 }
 
@@ -554,11 +570,177 @@ export function buildRoutes(app: AppContext): Route[] {
         };
       },
     },
+    // ---- M04: settlement ----
+    {
+      method: "POST",
+      pattern: "/api/campaigns/:id/grants",
+      roles: ["buyer"],
+      scope: "grants:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const g = createGrant(db, actor!, params.id!, {
+          sessionId: String(b.sessionId ?? ""),
+          maxAmountAtoms: Number(b.maxAmountAtoms ?? 0),
+          token: String(b.token ?? ""),
+          network: String(b.network ?? ""),
+          allowedPayees: Array.isArray(b.allowedPayees)
+            ? (b.allowedPayees as unknown[]).map(String)
+            : [],
+          sessionData:
+            b.sessionData !== undefined ? String(b.sessionData) : undefined,
+        });
+        return { status: 201, body: grantView(g) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/grants",
+      roles: ["buyer", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM grants WHERE campaign_id = ? ORDER BY created_at"
+          )
+          .all(params.id!) as unknown as GrantRow[];
+        return { body: { grants: rows.map(grantView) } };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/grants/:id/revoke",
+      roles: ["buyer"],
+      scope: "grants:write",
+      handler: ({ db, actor, params }) => ({
+        body: grantView(revokeGrant(db, actor!, params.id!)),
+      }),
+    },
+    {
+      method: "POST",
+      pattern: "/api/campaigns/:id/order-intents",
+      roles: ["buyer", "agent"],
+      scope: "intents:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const { intent, created } = createOrderIntent(db, actor!, params.id!, {
+          approvalId: String(b.approvalId ?? ""),
+          clientKey: String(b.clientKey ?? ""),
+        });
+        return { status: created ? 201 : 200, body: intentView(intent) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/order-intents",
+      roles: ["buyer", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM order_intents WHERE campaign_id = ? ORDER BY created_at"
+          )
+          .all(params.id!) as unknown as IntentRow[];
+        return { body: { intents: rows.map(intentView) } };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/printer/jobs",
+      roles: ["printer"],
+      scope: "jobs:read",
+      handler: ({ db, actor }) => {
+        const rows = db
+          .prepare(
+            `SELECT i.* FROM order_intents i
+              JOIN approvals a ON a.id = i.approval_id
+              JOIN quotes q ON q.id = a.quote_id
+             WHERE q.printer_id = ? ORDER BY i.created_at`
+          )
+          .all(actor!.printerId) as unknown as IntentRow[];
+        return { body: { jobs: rows.map(intentView) } };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/order-intents/:id/reserve",
+      roles: ["printer"],
+      scope: "intents:reserve",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const i = reserveIntent(db, actor!, params.id!, {
+          shopRef: String(b.shopRef ?? ""),
+        });
+        return { body: intentView(i) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/order-intents/:id/execute",
+      roles: ["buyer", "agent"],
+      scope: "intents:write",
+      handler: async ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const s = await executeIntent(db, actor!, params.id!, app.chain, {
+          grantId: b.grantId ? String(b.grantId) : undefined,
+          fundedBy: b.fundedBy ? String(b.fundedBy) : undefined,
+        });
+        return { body: spendView(s) };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/spends/:id/reconcile",
+      roles: ["buyer", "agent"],
+      scope: "intents:write",
+      handler: async ({ db, actor, params }) => {
+        const r = await reconcileSpend(db, actor!, params.id!, app.chain);
+        return { body: r };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/spends",
+      roles: ["buyer", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM spends WHERE campaign_id = ? ORDER BY created_at"
+          )
+          .all(params.id!) as unknown as SpendRow[];
+        const receipts = db
+          .prepare(
+            `SELECT r.* FROM spend_receipts r
+              JOIN spends s ON s.id = r.spend_id
+             WHERE s.campaign_id = ?`
+          )
+          .all(params.id!) as unknown as {
+          spend_id: string;
+          tx_hash: string;
+          raw: string;
+          observed_at: string;
+        }[];
+        return {
+          body: {
+            spends: rows.map(spendView),
+            receipts: receipts.map((r) => ({
+              spendId: r.spend_id,
+              txHash: r.tx_hash,
+              receipt: JSON.parse(r.raw),
+              observedAt: r.observed_at,
+            })),
+          },
+        };
+      },
+    },
     {
       method: "GET",
       pattern: "/api/health",
       public: true,
-      handler: () => ({ body: { status: "ok" } }),
+      handler: () => ({ body: { status: "ok", chain: app.chain.label } }),
     },
   ];
 }

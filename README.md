@@ -13,14 +13,18 @@ acceptance report.
 | Capability | State |
 |---|---|
 | Local durable API + sandbox ledger | Implemented (see module PRs) |
-| Real Celo mainnet spend | `NOT_RUN` — gated, requires explicit owner authorization |
-| Altana Agent Wallets session | `NOT_RUN` — adapter stubbed; sandbox grant model used locally |
+| Altana Agent Wallets adapter | Implemented, **disabled by default** — real `@altananetwork/sdk` path; all sends deny without configured session material |
+| Real Celo mainnet spend | `NOT_RUN` — requires `PRESSRECALL_CHAIN_ADAPTER=altana`, real session material, and explicit owner authorization |
 | Human pilot evidence | `NOT_RUN` — no impersonated evidence; sandbox flows are labeled `SANDBOX` |
 
 ## Requirements
 
-- Node.js **22.5+** (uses built-in `node:sqlite` — no native dependencies,
-  no runtime npm dependencies).
+- Node.js **22.5+** (uses built-in `node:sqlite` — no native dependencies).
+- Runtime deps: `@altananetwork/sdk@1.1.0` + `viem@2.57.18` — the real
+  settlement provider path (opt-in; see *Settlement adapters*). `1.1.0` is
+  the first line exporting `CELO`; `viem` is pinned to a version published
+  ≥7 days ago satisfying the SDK's `^2.21.0` range. The API, storage and
+  all tests run without them being exercised (sandbox default).
 
 ## Run
 
@@ -52,8 +56,8 @@ npm test            # builds, then runs node --test over dist/tests
   `events` (monotonic structured transition log).
 - `src/chain/` — `SignerAdapter` interface; `SandboxChainAdapter` is the
   default local ledger (labeled `SANDBOX`, deterministic tx hashes, fault
-  injection for ambiguity tests). `AltanaAdapter` is gated and returns
-  `NOT_CONFIGURED` without real credentials.
+  injection for ambiguity tests). `AltanaAdapter` is the real provider
+  implementation (see below).
 - `src/http/` — `node:http` router, scoped bearer-token auth, tenant
   isolation (cross-tenant = 404), JSON body bound (10 MB).
 - `web/` — static accessible UI: producer dashboard, site compare, shop
@@ -93,6 +97,44 @@ hostname must be in `PRESSRECALL_REDIRECT_ALLOWED_HOSTS` (default:
 `127.0.0.1,localhost`). `GET /r/:slug` is the demo operator redirector used
 locally. Field scans can also be recorded manually via `manualLocation` —
 they are retained explicitly as UNVERIFIED and cannot close the item.
+
+## Settlement adapters
+
+Default is the **sandbox** — a durable local ledger (`sandbox_ledger`),
+deterministic tx hashes, write-once rows keyed by the intent's deterministic
+identity. It executes the complete intent → grant → reserve → execute →
+receipt → reconcile lifecycle and supports fault injection (`dropResponse`)
+for ambiguity tests. Everything it emits is labeled `SANDBOX`.
+
+`AltanaAdapter` (`src/chain/altana.ts`) is the real provider path:
+
+- Executes the approved ERC-20 `transfer` through a human-granted,
+  permission-scoped **session key** via `client.execute({session, calls})`
+  on the SDK relay. Call data is built with viem `encodeFunctionData`
+  bound to the token contract, payee and exact atomic amount.
+- Re-verifies the grant **at use time**: session expiry, then the on-chain
+  session-key registration (`accountHasKey` on the public RPC). A revoked
+  grant denies even with unchanged app credentials.
+- A confirmed result is accepted only after the mined receipt's ERC-20
+  `Transfer` event is decoded and bound to token/payee/exact amount.
+- `PENDING` or unanswered executions become `AMBIGUOUS` carrying the
+  EIP-5792 `callsId`; reconciliation recovers via relay `getCallsStatus`
+  then the public-RPC receipt, never allocating a second leg.
+
+Opt-in only (never default): `PRESSRECALL_CHAIN_ADAPTER=altana` plus
+`PRESSRECALL_ALTANA_TOKENS='{"USD":"0x…contract…"}'`; each grant carries
+`sessionData` (`{serialized, sessionKey}` — a scoped, revocable credential,
+never logged). Without all three, every send denies as `NOT_CONFIGURED` —
+nothing can broadcast. Real mainnet spend remains `NOT_RUN` without
+explicit owner authorization.
+
+**Documented limitation:** `@altananetwork/sdk@1.1.0` has no ERC-8021
+builder-code/calldata-suffix support (`Call` is `{to, value, data}` and the
+relay builds the intent). On-chain attribution to this app is therefore not
+possible through the SDK; attribution is OFFCHAIN in PressRecall records
+(intentKey → callsId → txHash → grant → fundedBy) — `adapter.attribution`
+reports `OFFCHAIN`. ERC-8004 wallet identity is an admin-path wallet
+property, not part of session executes.
 
 ## Honest boundaries
 

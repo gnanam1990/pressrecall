@@ -5,6 +5,7 @@ import { openDb, type Db } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { createApp } from "../src/http/server.js";
 import { buildRoutes, type AppContext } from "../src/http/routes.js";
+import { SandboxChainAdapter } from "../src/chain/sandbox.js";
 
 export interface TestApp {
   url: string;
@@ -13,6 +14,7 @@ export interface TestApp {
   varDir: string;
   close: () => Promise<void>;
   db: Db;
+  chain: SandboxChainAdapter;
 }
 
 export const ACTORS = {
@@ -78,11 +80,13 @@ export async function startApp(opts?: {
   const db = openDb(dbPath);
   migrate(db);
   seedActors(db);
+  const chain = new SandboxChainAdapter(db);
 
   const server = createApp({
     db,
     routes: buildRoutes({
       objectDir,
+      chain,
       redirectPolicy: { allowedHosts: ["127.0.0.1", "localhost"] },
       ...opts?.extra,
     }),
@@ -97,6 +101,7 @@ export async function startApp(opts?: {
     objectDir,
     varDir,
     db,
+    chain,
     close: () =>
       new Promise((resolve) => {
         server.close(() => {
