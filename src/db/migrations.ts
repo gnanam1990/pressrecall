@@ -132,4 +132,72 @@ ALTER TABLE placements ADD COLUMN ink_fields TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE redirects ADD COLUMN managed_url TEXT;
 `,
   },
+  {
+    version: 5,
+    name: "quotes-proofs-approvals",
+    sql: `
+CREATE TABLE quote_requests (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  plan_item_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  dimensions TEXT NOT NULL,
+  deadline TEXT,
+  qty INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','CLOSED')),
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE quotes (
+  id TEXT PRIMARY KEY,
+  quote_request_id TEXT NOT NULL REFERENCES quote_requests(id),
+  campaign_id TEXT NOT NULL,
+  printer_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  revision_digest TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  price_atoms INTEGER NOT NULL,
+  token TEXT NOT NULL,
+  network TEXT NOT NULL,
+  direction TEXT NOT NULL DEFAULT 'pay-printer',
+  dimensions TEXT NOT NULL,
+  deadline TEXT,
+  expires_at TEXT NOT NULL,
+  quote_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_quotes_campaign ON quotes (campaign_id);
+CREATE INDEX idx_quotes_printer ON quotes (printer_id);
+
+CREATE TABLE proofs (
+  id TEXT PRIMARY KEY,
+  quote_request_id TEXT NOT NULL,
+  campaign_id TEXT NOT NULL,
+  printer_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  proof_digest TEXT NOT NULL,
+  asset_path TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_proofs_request ON proofs (quote_request_id);
+
+CREATE TABLE approvals (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  quote_request_id TEXT NOT NULL,
+  quote_id TEXT NOT NULL,
+  quote_hash TEXT NOT NULL,
+  proof_id TEXT NOT NULL,
+  proof_hash TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  budget_atoms INTEGER NOT NULL,
+  actor_id TEXT NOT NULL,
+  superseded_by TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX idx_approvals_campaign ON approvals (campaign_id);
+`,
+  },
 ];
