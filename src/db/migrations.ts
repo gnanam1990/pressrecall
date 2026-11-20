@@ -335,4 +335,24 @@ CREATE TABLE evidence (
 CREATE INDEX idx_evidence_placement ON evidence (placement_id);
 `,
   },
+  {
+    version: 9,
+    name: "releases",
+    sql: `
+CREATE TABLE releases (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL UNIQUE,
+  public_token TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('VERIFIED','CLOSED_WITH_EXCEPTIONS')),
+  report TEXT NOT NULL,
+  released_by TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+`,
+  },
+  {
+    version: 10,
+    name: "release-public-snapshot",
+    sql: `ALTER TABLE releases ADD COLUMN public_report TEXT;`,
+  },
 ];
