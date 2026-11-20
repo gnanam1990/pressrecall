@@ -1,9 +1,10 @@
 import type { Db } from "../db/connection.js";
 import type { Actor } from "../http/auth.js";
-import { conflict, notFound } from "../domain/errors.js";
+import { badRequest, conflict, notFound } from "../domain/errors.js";
 import { nowIso } from "../domain/ids.js";
 import { canonicalize } from "../domain/canon.js";
 import { emit } from "./events.js";
+import type { Resolver } from "./fetcher.js";
 import {
   getCampaign,
   getPlacement,
@@ -17,6 +18,7 @@ export interface RedirectRow {
   slug: string;
   tenant_id: string;
   current_target: string;
+  managed_url: string | null;
   updated_by: string;
   updated_at: string;
 }
@@ -27,24 +29,32 @@ export interface Decision {
 }
 
 /**
- * Constrained destination fetcher: resolves a managed redirect slug through
- * the internal operator-controlled registry only — never arbitrary network
- * access. This is the offline honest equivalent of the URL policy check.
+ * What the operator's deployed redirector actually serves. `attempted` false
+ * means no live observation exists (no managed URL registered or fetch
+ * failed) — a registry row alone is intended mapping, not observed service.
  */
-export function liveRedirectTarget(db: Db, tenantId: string, slug: string): string | null {
-  const row = db
-    .prepare("SELECT current_target FROM redirects WHERE slug = ? AND tenant_id = ?")
-    .get(slug, tenantId) as { current_target: string } | undefined;
-  return row?.current_target ?? null;
+export interface LiveObservation {
+  attempted: boolean;
+  location: string | null;
+  registryTarget: string | null;
+  managedUrl: string | null;
+  httpStatus?: number;
+  error?: string;
+}
+
+export function getRedirect(db: Db, tenantId: string, slug: string): RedirectRow | undefined {
+  return db
+    .prepare("SELECT * FROM redirects WHERE slug = ? AND tenant_id = ?")
+    .get(slug, tenantId) as RedirectRow | undefined;
 }
 
 export function upsertRedirect(
   db: Db,
   actor: Actor,
-  input: { slug: string; target: string }
+  input: { slug: string; target: string; managedUrl?: string }
 ): RedirectRow {
   if (!input.slug || !input.target) {
-    throw new Error("slug and target are required");
+    throw badRequest("slug and target are required");
   }
   const existing = db
     .prepare("SELECT * FROM redirects WHERE slug = ?")
@@ -53,19 +63,27 @@ export function upsertRedirect(
     throw notFound(`redirect '${input.slug}' not found`);
   }
   db.prepare(
-    `INSERT INTO redirects (slug, tenant_id, current_target, updated_by, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO redirects (slug, tenant_id, current_target, managed_url, updated_by, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(slug) DO UPDATE SET
        current_target = excluded.current_target,
+       managed_url = COALESCE(excluded.managed_url, redirects.managed_url),
        updated_by = excluded.updated_by,
        updated_at = excluded.updated_at`
-  ).run(input.slug, actor.tenantId, input.target, actor.id, nowIso());
+  ).run(
+    input.slug,
+    actor.tenantId,
+    input.target,
+    input.managedUrl ?? null,
+    actor.id,
+    nowIso()
+  );
   emit(db, {
     type: "redirect.updated",
     actorId: actor.id,
     entityType: "redirect",
     entityId: input.slug,
-    payload: { target: input.target },
+    payload: { target: input.target, managedUrl: input.managedUrl },
   });
   return db
     .prepare("SELECT * FROM redirects WHERE slug = ?")
@@ -77,15 +95,15 @@ export function upsertRedirect(
  *
  * INV-02: an incorrect value physically in ink always requires physical
  * intervention — a corrected redirect can never close an ink mismatch.
- * A redirect-managed placement closes at zero spend once the live
- * destination matches the approved target.
+ * A redirect-managed placement can only close on an observed resolution of
+ * its deployed managed URL matching the approved target (FR-04); the
+ * registry entry alone is intent, not proof.
  */
 export function classify(
-  db: Db,
-  actor: Actor,
   placement: PlacementRow,
   observed: RevisionRow | null,
-  target: RevisionRow
+  target: RevisionRow,
+  live?: LiveObservation
 ): Decision {
   if (!observed) {
     return { state: "UNKNOWN", reason: "installed version unknown; field verification required" };
@@ -110,13 +128,12 @@ export function classify(
   const redirectDiffers =
     (observed.redirect_target ?? null) !== (target.redirect_target ?? null);
   if (redirectDiffers && placement.managed_redirect === 1 && placement.redirect_slug) {
-    const live = liveRedirectTarget(db, actor.tenantId, placement.redirect_slug);
-    if (live !== null && live === target.redirect_target) {
-      return { state: "VERIFIED", reason: "managed destination already resolves to approved target" };
+    if (live?.attempted && live.location === target.redirect_target) {
+      return { state: "VERIFIED", reason: "deployed managed URL observed resolving to approved target" };
     }
     return {
       state: "REDIRECT_CHECK",
-      reason: "managed redirect is stale; operator correction then fresh scan required",
+      reason: "managed redirect stale or unverified; operator correction then observed scan required",
     };
   }
   if (redirectDiffers) {
@@ -170,15 +187,45 @@ function loadItem(db: Db, campaignId: string, item: PlanItemRow) {
   return { placement, target, observed };
 }
 
+/** Fetch the deployed redirect's actual Location under the scoped policy. */
+async function observeLive(
+  db: Db,
+  tenantId: string,
+  slug: string,
+  resolve: Resolver
+): Promise<LiveObservation> {
+  const reg = getRedirect(db, tenantId, slug);
+  const base: LiveObservation = {
+    attempted: false,
+    location: null,
+    registryTarget: reg?.current_target ?? null,
+    managedUrl: reg?.managed_url ?? null,
+  };
+  if (!reg?.managed_url) return base;
+  try {
+    const r = await resolve(reg.managed_url);
+    return {
+      ...base,
+      attempted: true,
+      location: r.location,
+      httpStatus: r.status,
+    };
+  } catch (err) {
+    return { ...base, attempted: true, error: String((err as Error).message) };
+  }
+}
+
 /**
  * Evaluate every open plan item in the campaign against the current target
- * revision. VERIFIED and EXCEPTION items are terminal and not reclassified.
+ * revision, performing live resolution where a managed redirect applies.
+ * VERIFIED and EXCEPTION items are terminal and not reclassified.
  */
-export function evaluateCampaign(
+export async function evaluateCampaign(
   db: Db,
   actor: Actor,
-  campaignId: string
-): { planItemId: string; placementId: string; siteCode: string; state: string; reason: string }[] {
+  campaignId: string,
+  resolve: Resolver
+): Promise<{ planItemId: string; placementId: string; siteCode: string; state: string; reason: string }[]> {
   getCampaign(db, actor, campaignId);
   const items = db
     .prepare(
@@ -192,8 +239,12 @@ export function evaluateCampaign(
   const results = [];
   for (const item of items) {
     const { placement, target, observed } = loadItem(db, campaignId, item);
-    const decision = classify(db, actor, placement, observed, target);
-    const updated = applyDecision(db, actor, item, decision);
+    let live: LiveObservation | undefined;
+    if (placement.managed_redirect === 1 && placement.redirect_slug) {
+      live = await observeLive(db, actor.tenantId, placement.redirect_slug, resolve);
+    }
+    const decision = classify(placement, observed, target, live);
+    const updated = applyDecision(db, actor, item, decision, live?.attempted ? { live } : undefined);
     results.push({
       planItemId: item.id,
       placementId: item.placement_id,
@@ -206,18 +257,24 @@ export function evaluateCampaign(
 }
 
 /**
- * Record a fresh field scan of a managed destination. Closes the item only
- * when the scan agrees with the operator-confirmed registry AND matches the
- * approved target — at zero spend. Scan/registry disagreement requires a
- * second check and keeps the item open.
+ * Record a scan of a managed destination.
+ *
+ * Default (server-verified): the server fetches the placement's deployed
+ * managed URL under the scoped site policy and records the observed Location.
+ * VERIFIED only when that observed resolution equals the approved target.
+ *
+ * Manual (`manualLocation`): retains an explicit UNVERIFIED observation —
+ * a field report of what the scan showed. It records evidence but can never
+ * close the item.
  */
-export function recordScan(
+export async function recordScan(
   db: Db,
   actor: Actor,
   campaignId: string,
   planItemId: string,
-  input: { resolvedTarget: string }
-): PlanItemRow {
+  input: { manualLocation?: string; note?: string },
+  resolve: Resolver
+): Promise<PlanItemRow> {
   getCampaign(db, actor, campaignId);
   const item = db
     .prepare("SELECT * FROM plan_items WHERE id = ? AND campaign_id = ?")
@@ -231,32 +288,51 @@ export function recordScan(
   if (placement.managed_redirect !== 1 || !placement.redirect_slug) {
     throw conflict("placement has no managed redirect to scan");
   }
-  const live = liveRedirectTarget(db, actor.tenantId, placement.redirect_slug);
+
+  // Explicit manual observation: recorded, never sufficient to verify.
+  if (input.manualLocation !== undefined) {
+    const live = await observeLive(db, actor.tenantId, placement.redirect_slug, resolve);
+    return applyDecision(db, actor, item, {
+      state: item.state === "OBSERVED" ? "REDIRECT_CHECK" : item.state,
+      reason:
+        "manual scan recorded (UNVERIFIED); server-observed resolution required to close",
+    }, {
+      type: "manual-scan",
+      method: "manual",
+      reportedLocation: input.manualLocation,
+      note: input.note ?? null,
+      verified: false,
+      observedBy: actor.id,
+      serverObservation: live,
+      scannedAt: nowIso(),
+    });
+  }
+
+  const live = await observeLive(db, actor.tenantId, placement.redirect_slug, resolve);
   const evidence = {
     type: "redirect-scan",
-    resolvedTarget: input.resolvedTarget,
-    registryTarget: live,
+    method: "http",
+    ...live,
     approvedTarget: target.redirect_target,
     scannedAt: nowIso(),
   };
 
-  if (input.resolvedTarget !== live) {
-    applyDecision(db, actor, item, {
+  if (!live.attempted || live.error) {
+    return applyDecision(db, actor, item, {
       state: "REDIRECT_CHECK",
-      reason: "scan disagrees with operator registry; second check required",
+      reason: live.managedUrl
+        ? `live resolution failed (${live.error ?? "no response"}); retry or record a manual scan`
+        : "no managed URL registered for this placement's redirect",
     }, evidence);
-    throw conflict(
-      "scan disagrees with operator registry; second check required"
-    );
   }
-  if (input.resolvedTarget === target.redirect_target) {
+  if (live.location === target.redirect_target) {
     return applyDecision(db, actor, item, {
       state: "VERIFIED",
-      reason: "fresh scan confirms managed destination matches approved target (zero spend)",
+      reason: "deployed managed URL observed resolving to approved target (zero spend)",
     }, evidence);
   }
   return applyDecision(db, actor, item, {
     state: "REDIRECT_CHECK",
-    reason: "destination still does not match approved target",
+    reason: `deployed managed URL resolves to '${live.location ?? "(no location)"}', not the approved target`,
   }, evidence);
 }

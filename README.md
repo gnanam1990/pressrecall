@@ -83,6 +83,17 @@ A bare `x-actor-id` header is **rejected** everywhere by default. It resolves
 only when the server is started with `PRESSRECALL_DEMO_AUTH=1`, an explicit
 isolated-demo escape hatch — do not use it for shared or pilot deployments.
 
+## Redirect verification
+
+A redirect-only placement is VERIFIED only after the server observes the
+deployed managed URL actually resolving to the approved destination — the
+registry row alone records intent, not proof. The destination fetcher is
+tightly scoped: http/https only, single request, `redirect: manual`, and the
+hostname must be in `PRESSRECALL_REDIRECT_ALLOWED_HOSTS` (default:
+`127.0.0.1,localhost`). `GET /r/:slug` is the demo operator redirector used
+locally. Field scans can also be recorded manually via `manualLocation` —
+they are retained explicitly as UNVERIFIED and cannot close the item.
+
 ## Honest boundaries
 
 - All payment flows run against the sandbox ledger unless real credentials

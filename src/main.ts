@@ -19,7 +19,19 @@ if (applied.length) {
 
 const server = createApp({
   db,
-  routes: buildRoutes({ objectDir }),
+  routes: buildRoutes({
+    objectDir,
+    redirectPolicy: {
+      // Tightly scoped site policy: only these hostnames may be resolved by
+      // the destination fetcher. Default covers local demo/operator services.
+      allowedHosts: (
+        process.env.PRESSRECALL_REDIRECT_ALLOWED_HOSTS ?? "127.0.0.1,localhost"
+      )
+        .split(",")
+        .map((h) => h.trim())
+        .filter(Boolean),
+    },
+  }),
   staticDir: webDir,
   // Isolated-demo auth ONLY when explicitly requested; never default.
   demoAuth: process.env.PRESSRECALL_DEMO_AUTH === "1",

@@ -20,12 +20,15 @@ import {
   recordScan,
   upsertRedirect,
 } from "../services/planner.js";
+import { createResolver, type RedirectPolicy } from "../services/fetcher.js";
 
 export interface AppContext {
   objectDir: string;
+  redirectPolicy?: RedirectPolicy;
 }
 
 export function buildRoutes(app: AppContext): Route[] {
+  const resolve = createResolver(app.redirectPolicy ?? { allowedHosts: [] });
   return [
     {
       method: "POST",
@@ -283,8 +286,8 @@ export function buildRoutes(app: AppContext): Route[] {
       pattern: "/api/campaigns/:id/plans/evaluate",
       roles: ["agent"],
       scope: "plans:evaluate",
-      handler: ({ db, actor, params }) => ({
-        body: { results: evaluateCampaign(db, actor!, params.id!) },
+      handler: async ({ db, actor, params }) => ({
+        body: { results: await evaluateCampaign(db, actor!, params.id!, resolve) },
       }),
     },
     {
@@ -292,11 +295,13 @@ export function buildRoutes(app: AppContext): Route[] {
       pattern: "/api/campaigns/:id/plan-items/:piid/scan",
       roles: ["agent", "coordinator"],
       scope: "observations:write",
-      handler: ({ db, actor, params, body }) => {
+      handler: async ({ db, actor, params, body }) => {
         const b = (body ?? {}) as Record<string, unknown>;
-        const item = recordScan(db, actor!, params.id!, params.piid!, {
-          resolvedTarget: String(b.resolvedTarget ?? ""),
-        });
+        const item = await recordScan(db, actor!, params.id!, params.piid!, {
+          manualLocation:
+            b.manualLocation !== undefined ? String(b.manualLocation) : undefined,
+          note: b.note !== undefined ? String(b.note) : undefined,
+        }, resolve);
         return {
           body: {
             id: item.id,
@@ -319,16 +324,35 @@ export function buildRoutes(app: AppContext): Route[] {
         const row = upsertRedirect(db, actor!, {
           slug: String(b.slug ?? ""),
           target: String(b.target ?? ""),
+          managedUrl: b.managedUrl !== undefined ? String(b.managedUrl) : undefined,
         });
         return {
           status: 201,
           body: {
             slug: row.slug,
             currentTarget: row.current_target,
+            managedUrl: row.managed_url,
             updatedBy: row.updated_by,
             updatedAt: row.updated_at,
           },
         };
+      },
+    },
+    {
+      // Demo operator redirector: serves the managed destination as a real
+      // HTTP 302 — the honest local stand-in for the operator's deployed
+      // redirect service that an installed QR actually resolves.
+      method: "GET",
+      pattern: "/r/:slug",
+      public: true,
+      handler: ({ db, params }) => {
+        const row = db
+          .prepare("SELECT current_target FROM redirects WHERE slug = ?")
+          .get(params.slug!) as { current_target: string } | undefined;
+        if (!row) {
+          return { status: 404, body: { error: { code: "not_found", message: "unknown redirect slug" } } };
+        }
+        return { redirect: row.current_target };
       },
     },
     {
@@ -342,6 +366,7 @@ export function buildRoutes(app: AppContext): Route[] {
           | {
               slug: string;
               current_target: string;
+              managed_url: string | null;
               updated_by: string;
               updated_at: string;
             }
@@ -353,6 +378,7 @@ export function buildRoutes(app: AppContext): Route[] {
           body: {
             slug: row.slug,
             currentTarget: row.current_target,
+            managedUrl: row.managed_url,
             updatedBy: row.updated_by,
             updatedAt: row.updated_at,
           },

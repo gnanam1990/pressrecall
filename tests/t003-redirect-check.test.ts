@@ -1,29 +1,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startApp, api, ACTORS } from "./helpers.js";
+import { startApp, startRedirectServer, api, ACTORS } from "./helpers.js";
 
 /**
  * T-003 — Placement decision — Normal workflow
  * Correct the managed destination at site A and verify a fresh scan closes
  * its web-only task at zero spend.
+ *
+ * Review requirement: VERIFIED observes the actually deployed redirect over
+ * real HTTP (an independent operator redirect service), not just the
+ * intended registry mapping.
  */
-test("T-003: corrected managed destination + fresh scan closes web-only task at zero spend", async () => {
+test("T-003: deployed redirect observed over HTTP closes web-only task at zero spend", async () => {
   const app = await startApp();
   const buyer = ACTORS.buyer.id;
   const agent = ACTORS.agent.id;
   const ops = ACTORS.operator.id;
 
+  // Independent operator redirect service — what the installed QR serves.
+  const redirector = await startRedirectServer("https://fest.example/sat");
+
   try {
     const c = await api(app, buyer, "POST", "/api/campaigns", { name: "Fest" });
     const cid = c.json.id;
 
-    // revA: Saturday in ink + old managed destination.
     const revA = await api(app, buyer, "POST", `/api/campaigns/${cid}/revisions`, {
       assetText: "poster-v1",
       body: { eventDateText: "Saturday June 6" },
       redirectTarget: "https://fest.example/sat",
     });
-    // revB: Sunday in ink + corrected destination (change class both).
     const revB = await api(app, buyer, "POST", `/api/campaigns/${cid}/revisions`, {
       assetText: "poster-v2",
       body: { eventDateText: "Sunday June 7" },
@@ -32,7 +37,6 @@ test("T-003: corrected managed destination + fresh scan closes web-only task at 
     });
     assert.equal(revB.json.changeClass, "both");
 
-    // Site A: no date in ink ("check current dates online"), QR managed.
     const siteA = await api(app, buyer, "POST", `/api/campaigns/${cid}/placements`, {
       siteCode: "A",
       siteLabel: "Ferry Building kiosk",
@@ -44,37 +48,51 @@ test("T-003: corrected managed destination + fresh scan closes web-only task at 
     });
     const itemA = siteA.json.planItem.id;
 
-    // Operator registry still resolves to the Saturday destination.
+    // Registry binds the slug to the deployed managed URL (the QR target).
     await api(app, ops, "POST", "/api/redirects", {
       slug: "hl/ferry",
       target: "https://fest.example/sat",
+      managedUrl: `${redirector.url}/hl/ferry`,
     });
 
-    // Agent evaluates: site A is a web-only redirect check.
+    // Evaluate: live resolution shows the deployed redirect still stale.
     const evalRes = await api(app, agent, "POST", `/api/campaigns/${cid}/plans/evaluate`);
-    assert.equal(evalRes.status, 200);
     const a = evalRes.json.results.find((r: any) => r.siteCode === "A");
     assert.equal(a.state, "REDIRECT_CHECK");
 
-    // Operator corrects the managed destination.
+    // Operator records the intended correction in the registry — but the
+    // deployed service still serves Saturday. Registry alone proves intent,
+    // not what the QR serves.
     await api(app, ops, "POST", "/api/redirects", {
       slug: "hl/ferry",
       target: "https://fest.example/sun",
     });
+    const premature = await api(
+      app,
+      ACTORS.coordinator.id,
+      "POST",
+      `/api/campaigns/${cid}/plan-items/${itemA}/scan`
+    );
+    assert.equal(premature.json.state, "REDIRECT_CHECK");
+    assert.equal(premature.json.evidence.location, "https://fest.example/sat");
+    assert.match(premature.json.reason, /not the approved target/);
 
-    // Fresh scan confirms the deployed destination → VERIFIED, zero spend.
+    // Operator deploys the correction; a fresh scan observes it → VERIFIED.
+    redirector.setLocation("https://fest.example/sun");
     const scan = await api(
       app,
       ACTORS.coordinator.id,
       "POST",
-      `/api/campaigns/${cid}/plan-items/${itemA}/scan`,
-      { resolvedTarget: "https://fest.example/sun" }
+      `/api/campaigns/${cid}/plan-items/${itemA}/scan`
     );
     assert.equal(scan.status, 200);
     assert.equal(scan.json.state, "VERIFIED");
     assert.equal(scan.json.decidedBy, ACTORS.coordinator.id);
-    assert.equal(scan.json.evidence.resolvedTarget, "https://fest.example/sun");
+    assert.equal(scan.json.evidence.method, "http");
+    assert.equal(scan.json.evidence.location, "https://fest.example/sun");
     assert.equal(scan.json.evidence.approvedTarget, "https://fest.example/sun");
+    assert.equal(scan.json.evidence.managedUrl, `${redirector.url}/hl/ferry`);
+    assert.equal(scan.json.evidence.httpStatus, 302);
 
     // Zero spend: no spend/order events were emitted for this campaign.
     const spendEvents = app.db
@@ -83,6 +101,72 @@ test("T-003: corrected managed destination + fresh scan closes web-only task at 
       )
       .get(cid) as { n: number };
     assert.equal(spendEvents.n, 0);
+  } finally {
+    await redirector.close();
+    await app.close();
+  }
+});
+
+test("T-003b: out-of-policy managed URL cannot be resolved; manual scan stays unverified", async () => {
+  const app = await startApp();
+  const buyer = ACTORS.buyer.id;
+  const ops = ACTORS.operator.id;
+  const agent = ACTORS.agent.id;
+
+  try {
+    const c = await api(app, buyer, "POST", "/api/campaigns", { name: "Fest2" });
+    const cid = c.json.id;
+    const revA = await api(app, buyer, "POST", `/api/campaigns/${cid}/revisions`, {
+      assetText: "p1",
+      body: {},
+      redirectTarget: "https://x.example/old",
+    });
+    await api(app, buyer, "POST", `/api/campaigns/${cid}/revisions`, {
+      assetText: "p2",
+      body: {},
+      redirectTarget: "https://x.example/new",
+      parentId: revA.json.id,
+    });
+    const site = await api(app, buyer, "POST", `/api/campaigns/${cid}/placements`, {
+      siteCode: "D",
+      siteLabel: "Out-of-policy wall",
+      format: "A2",
+      managedRedirect: true,
+      redirectSlug: "hl/denied",
+      inkFields: [],
+      observedRevisionId: revA.json.id,
+    });
+    const itemId = site.json.planItem.id;
+
+    // Managed URL on a host outside the allowlist — fetch must be refused.
+    await api(app, ops, "POST", "/api/redirects", {
+      slug: "hl/denied",
+      target: "https://x.example/new",
+      managedUrl: "http://169.254.169.254/r",
+    });
+    const scan = await api(
+      app,
+      agent,
+      "POST",
+      `/api/campaigns/${cid}/plan-items/${itemId}/scan`
+    );
+    assert.equal(scan.json.state, "REDIRECT_CHECK");
+    assert.match(scan.json.evidence.error, /allowlist/);
+    assert.match(scan.json.reason, /resolution failed/);
+
+    // Manual field observation is retained but explicitly UNVERIFIED.
+    const manual = await api(
+      app,
+      ACTORS.coordinator.id,
+      "POST",
+      `/api/campaigns/${cid}/plan-items/${itemId}/scan`,
+      { manualLocation: "https://x.example/new", note: "field QR scan" }
+    );
+    assert.equal(manual.json.state, "REDIRECT_CHECK");
+    assert.equal(manual.json.evidence.method, "manual");
+    assert.equal(manual.json.evidence.verified, false);
+    assert.equal(manual.json.evidence.reportedLocation, "https://x.example/new");
+    assert.match(manual.json.reason, /UNVERIFIED/);
   } finally {
     await app.close();
   }

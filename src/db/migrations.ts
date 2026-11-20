@@ -125,4 +125,11 @@ CREATE TABLE redirects (
 ALTER TABLE placements ADD COLUMN ink_fields TEXT NOT NULL DEFAULT '[]';
 `,
   },
+  {
+    version: 4,
+    name: "redirect-managed-url",
+    sql: `
+ALTER TABLE redirects ADD COLUMN managed_url TEXT;
+`,
+  },
 ];

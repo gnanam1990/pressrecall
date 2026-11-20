@@ -81,7 +81,11 @@ export async function startApp(opts?: {
 
   const server = createApp({
     db,
-    routes: buildRoutes({ objectDir, ...opts?.extra }),
+    routes: buildRoutes({
+      objectDir,
+      redirectPolicy: { allowedHosts: ["127.0.0.1", "localhost"] },
+      ...opts?.extra,
+    }),
     staticDir: undefined,
     demoAuth: opts?.demoAuth === true,
   });
@@ -106,6 +110,32 @@ export async function startApp(opts?: {
 export interface ApiResult {
   status: number;
   json: any;
+}
+
+/**
+ * Independent operator redirect service: a separate local HTTP server that
+ * 302s to a mutable target — what an installed QR actually resolves to.
+ */
+export async function startRedirectServer(initialLocation: string): Promise<{
+  url: string;
+  setLocation: (loc: string) => void;
+  close: () => Promise<void>;
+}> {
+  const { createServer } = await import("node:http");
+  let location = initialLocation;
+  const server = createServer((req, res) => {
+    res.writeHead(302, { location });
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  return {
+    url: `http://127.0.0.1:${port}`,
+    setLocation: (loc) => {
+      location = loc;
+    },
+    close: () => new Promise((r) => server.close(() => r())),
+  };
 }
 
 /** Mint a scoped token for a seeded actor. */
