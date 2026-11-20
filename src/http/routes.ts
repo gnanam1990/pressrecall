@@ -37,6 +37,17 @@ import {
   type SpendRow,
 } from "../services/settlement.js";
 import {
+  acceptJob,
+  deliveryView,
+  disputeIntent,
+  evidenceView,
+  installationStatus,
+  recordDelivery,
+  uploadEvidence,
+  type DeliveryRow,
+  type EvidenceRow,
+} from "../services/fulfillment.js";
+import {
   approvalEligible,
   approvalView,
   createApproval,
@@ -255,7 +266,12 @@ export function buildRoutes(app: AppContext): Route[] {
           )
           .all(params.id!) as unknown as PlacementRow[];
         return {
-          body: { placements: rows.map((p) => placementView(db, p)) },
+          body: {
+            placements: rows.map((p) => ({
+              ...placementView(db, p),
+              installation: installationStatus(db, p.id),
+            })),
+          },
         };
       },
     },
@@ -267,7 +283,12 @@ export function buildRoutes(app: AppContext): Route[] {
       handler: ({ db, actor, params }) => {
         getCampaign(db, actor!, params.id!);
         const p = getPlacement(db, params.id!, params.pid!);
-        return { body: placementView(db, p) };
+        return {
+          body: {
+            ...placementView(db, p),
+            installation: installationStatus(db, p.id),
+          },
+        };
       },
     },
     {
@@ -697,6 +718,132 @@ export function buildRoutes(app: AppContext): Route[] {
       handler: async ({ db, actor, params }) => {
         const r = await reconcileSpend(db, actor!, params.id!, app.chain);
         return { body: r };
+      },
+    },
+    // ---- M05: fulfillment & field evidence ----
+    {
+      method: "POST",
+      pattern: "/api/order-intents/:id/accept",
+      roles: ["printer"],
+      scope: "fulfillment:write",
+      handler: ({ db, actor, params }) => ({
+        body: intentView(acceptJob(db, actor!, params.id!)),
+      }),
+    },
+    {
+      method: "POST",
+      pattern: "/api/order-intents/:id/deliveries",
+      roles: ["printer"],
+      scope: "fulfillment:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const { delivery, created } = recordDelivery(db, actor!, params.id!, {
+          placementId: String(b.placementId ?? ""),
+          qty: Number(b.qty ?? 0),
+          revisionId: String(b.revisionId ?? ""),
+          shipmentRef: b.shipmentRef ? String(b.shipmentRef) : undefined,
+          clientKey: String(b.clientKey ?? ""),
+        });
+        return { status: created ? 201 : 200, body: deliveryView(delivery) };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/order-intents/:id/deliveries",
+      roles: ["buyer", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        const intent = db
+          .prepare("SELECT * FROM order_intents WHERE id = ?")
+          .get(params.id!) as IntentRow | undefined;
+        if (!intent) {
+          return {
+            status: 404,
+            body: { error: { code: "not_found", message: "intent not found" } },
+          };
+        }
+        getCampaign(db, actor!, intent.campaign_id);
+        const rows = db
+          .prepare(
+            "SELECT * FROM deliveries WHERE intent_id = ? ORDER BY created_at"
+          )
+          .all(params.id!) as unknown as DeliveryRow[];
+        return { body: { deliveries: rows.map(deliveryView) } };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/printer/deliveries",
+      roles: ["printer"],
+      scope: "jobs:read",
+      handler: ({ db, actor }) => {
+        const rows = db
+          .prepare(
+            `SELECT d.* FROM deliveries d
+              JOIN order_intents i ON i.id = d.intent_id
+              JOIN approvals a ON a.id = i.approval_id
+              JOIN quotes q ON q.id = a.quote_id
+             WHERE q.printer_id = ? ORDER BY d.created_at`
+          )
+          .all(actor!.printerId) as unknown as DeliveryRow[];
+        return { body: { deliveries: rows.map(deliveryView) } };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/order-intents/:id/dispute",
+      roles: ["buyer"],
+      scope: "intents:write",
+      handler: ({ db, actor, params }) => ({
+        body: intentView(disputeIntent(db, actor!, params.id!)),
+      }),
+    },
+    {
+      method: "POST",
+      pattern: "/api/campaigns/:id/placements/:pid/evidence",
+      roles: ["buyer", "coordinator", "agent"],
+      scope: "evidence:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const { evidence, created, installation } = uploadEvidence(
+          db,
+          actor!,
+          params.id!,
+          params.pid!,
+          app.objectDir,
+          {
+            clientKey: String(b.clientKey ?? ""),
+            assetText:
+              b.assetText !== undefined ? String(b.assetText) : undefined,
+            assetBase64:
+              b.assetBase64 !== undefined ? String(b.assetBase64) : undefined,
+            revisionDigestSeen:
+              b.revisionDigestSeen !== undefined
+                ? String(b.revisionDigestSeen)
+                : undefined,
+            capturedAt: b.capturedAt ? String(b.capturedAt) : undefined,
+            note: b.note ? String(b.note) : undefined,
+          }
+        );
+        return {
+          status: created ? 201 : 200,
+          body: { ...evidenceView(evidence), installation },
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/placements/:pid/evidence",
+      roles: ["buyer", "coordinator", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM evidence WHERE placement_id = ? ORDER BY created_at"
+          )
+          .all(params.pid!) as unknown as EvidenceRow[];
+        return { body: { evidence: rows.map(evidenceView) } };
       },
     },
     {

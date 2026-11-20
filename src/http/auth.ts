@@ -44,6 +44,7 @@ export const ROLE_SCOPES: Record<Role, string[]> = {
     "exports:read",
     "grants:write",
     "redirects:read",
+    "evidence:write",
   ],
   coordinator: [
     "campaigns:read",
@@ -60,6 +61,7 @@ export const ROLE_SCOPES: Record<Role, string[]> = {
     "quotes:write",
     "release:read",
     "redirects:read",
+    "evidence:write",
   ],
   printer: [
     "quotes:read",
