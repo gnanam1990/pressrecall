@@ -3,13 +3,13 @@ import assert from "node:assert/strict";
 import { startApp, api, pipeline, ACTORS } from "./helpers.js";
 
 /**
- * T-014 — Release regression coverage:
+ * T-015 — Release regression coverage:
  *  - the public bundle is a persisted snapshot: state changes after
  *    publication must NOT alter what was shared with the client;
  *  - an empty campaign cannot be released (no VERIFIED on nothing);
  *  - unresolved sites require explicit exception signoff.
  */
-test("T-014: public bundle is an immutable snapshot; empty campaign and signoff guarded", async () => {
+test("T-015: public bundle is an immutable snapshot; empty campaign and signoff guarded", async () => {
   const app = await startApp();
   const buyer = ACTORS.buyer.id;
   const coord = ACTORS.coordinator.id;

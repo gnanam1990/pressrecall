@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PressRecall — client export</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <style>
+      main { max-width: 760px; }
+      .pub-badge {
+        display: inline-block; font-size: .72rem; font-weight: 700;
+        letter-spacing: .05em; padding: .2rem .6rem; border-radius: 999px;
+        background: var(--info-bg); color: var(--info); margin-left: .5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">◳</span>
+        <span class="name">PressRecall</span>
+        <span class="pub-badge">CLIENT VIEW · REDACTED</span>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <p class="muted">Loading shared release…</p>
+    </main>
+    <script type="module">
+      const h = (tag, attrs = {}, ...kids) => {
+        const el = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs ?? {})) {
+          if (v == null || v === false) continue;
+          if (k === "class") el.className = v;
+          else if (k === "text") el.textContent = v;
+          else el.setAttribute(k, v === true ? "" : String(v));
+        }
+        for (const kid of kids.flat(Infinity)) {
+          if (kid == null || kid === false) continue;
+          el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+        }
+        return el;
+      };
+      const atoms = (n, t = "") => `${Number(n ?? 0).toLocaleString()} ${t}`.trim();
+      const short = (s, n = 18) => (s && s.length > n ? s.slice(0, n) + "…" : s || "—");
+      const chip = (cls, txt) => h("span", { class: `chip ${cls}` }, txt);
+      const CHIP = { VERIFIED: "ok", CURRENT: "ok", CONFIRMED: "ok",
+        REPRINT: "warn", MISMATCH: "bad", CLOSED_WITH_EXCEPTIONS: "warn" };
+
+      const main = document.getElementById("main");
+      const token = new URLSearchParams(location.search).get("token");
+
+      async function load() {
+        if (!token) {
+          main.innerHTML = "";
+          main.append(h("div", { class: "card" },
+            h("h1", {}, "No release token"),
+            h("p", { class: "muted" }, "This link needs a ?token= capability parameter.")));
+          return;
+        }
+        const res = await fetch(`/api/release/${encodeURIComponent(token)}`);
+        if (!res.ok) {
+          main.innerHTML = "";
+          main.append(h("div", { class: "card" },
+            h("h1", {}, "Release not found"),
+            h("p", { class: "muted" }, "The capability token is unknown or the release was never published.")));
+          return;
+        }
+        const b = await res.json();
+        render(b);
+      }
+
+      function render(b) {
+        main.innerHTML = "";
+        const attr = b.attribution || {};
+        main.append(
+          h("div", { class: "card" },
+            h("div", { class: "row between" },
+              h("h1", {}, b.name || "Campaign release"),
+              chip(CHIP[b.status] || "info", b.status)),
+            h("dl", { class: "kv" },
+              h("dt", {}, "released"), h("dd", {}, (b.releasedAt || "").slice(0, 19)),
+              h("dt", {}, "sites verified"), h("dd", {}, `${b.counts?.sitesVerified ?? 0} of ${b.counts?.sitesTotal ?? 0}`),
+              h("dt", {}, "total settled"), h("dd", {}, atoms(b.costs?.settledAtoms)),
+              h("dt", {}, "  · sandbox ledger"), h("dd", {}, atoms(b.costs?.sandboxSettledAtoms)),
+              h("dt", {}, "  · live ledger"), h("dd", {}, atoms(b.costs?.liveSettledAtoms)),
+              h("dt", {}, "independent use"), h("dd", {},
+                `${atoms(attr.independentAtoms)} · evidence ${attr.evidenceClass || "NONE"}`),
+              h("dt", {}, "exceptions"), h("dd", {}, String(b.exceptions?.length ?? 0))),
+            h("p", { class: "muted small" }, b.redaction || "")),
+
+          h("div", { class: "card" },
+            h("h2", {}, "Sites"),
+            h("table", {},
+              h("thead", {}, h("tr", {},
+                h("th", {}, "code"), h("th", {}, "state"), h("th", {}, "target digest"), h("th", {}, "evidence"), h("th", {}, "deliveries"))),
+              h("tbody", {}, (b.sites || []).map((s) => h("tr", {},
+                h("td", {}, s.siteCode),
+                h("td", {}, chip(CHIP[s.planState] || "", s.planState)),
+                h("td", { class: "mono" }, short(s.targetDigest)),
+                h("td", {}, String(s.evidenceCount ?? 0)),
+                h("td", {}, (s.deliveries || []).length
+                  ? s.deliveries.map((d) => `${d.qty}× ${d.onTarget ? "on-target" : "off-target"}`).join(", ")
+                  : "—")))))),
+
+          h("div", { class: "card" },
+            h("h2", {}, "Payments — independently verifiable"),
+            (b.costs?.payments || []).length
+              ? h("table", {},
+                  h("thead", {}, h("tr", {},
+                    h("th", {}, "amount"), h("th", {}, "tx hash"), h("th", {}, "ledger"), h("th", {}, "receipt"))),
+                  h("tbody", {}, b.costs.payments.map((p) => h("tr", {},
+                    h("td", {}, atoms(p.amountAtoms, p.token)),
+                    h("td", { class: "mono", "data-tx": p.txHash || "" }, short(p.txHash, 26)),
+                    h("td", {}, p.ledger && p.ledger.startsWith("SANDBOX")
+                      ? h("span", { class: "chip sandbox" }, "sandbox")
+                      : chip("info", p.ledger || "—")),
+                    h("td", {}, p.receiptMatched ? chip("ok", "receipt matched") : chip("warn", "unconfirmed"))))))
+              : h("p", { class: "muted" }, "No payments in this release.")),
+        );
+      }
+
+      load();
+    </script>
+  </body>
+</html>

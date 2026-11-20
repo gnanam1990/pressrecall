@@ -64,6 +64,7 @@ import {
   type QuoteRequestRow,
   type QuoteRow,
   type ApprovalRow,
+  type ProofRow,
 } from "../services/quotes.js";
 
 export interface AppContext {
@@ -484,6 +485,34 @@ export function buildRoutes(app: AppContext): Route[] {
       },
     },
     {
+      // Proofs submitted against a campaign RFQ — the buyer needs these to
+      // pick a proofId when approving a quote.
+      method: "GET",
+      pattern: "/api/campaigns/:id/quote-requests/:qrid/proofs",
+      roles: ["buyer", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const rows = db
+          .prepare(
+            "SELECT * FROM proofs WHERE quote_request_id = ? ORDER BY created_at"
+          )
+          .all(params.qrid!) as unknown as ProofRow[];
+        return {
+          body: {
+            proofs: rows.map((p) => ({
+              id: p.id,
+              quoteRequestId: p.quote_request_id,
+              printerId: p.printer_id,
+              revisionId: p.revision_id,
+              proofDigest: p.proof_digest,
+              createdAt: p.created_at,
+            })),
+          },
+        };
+      },
+    },
+    {
       method: "GET",
       pattern: "/api/printer/quotes",
       roles: ["printer"],
@@ -852,6 +881,36 @@ export function buildRoutes(app: AppContext): Route[] {
       },
     },
     {
+      // Evidence payload bytes — private tenant audience only, never in
+      // the public bundle.
+      method: "GET",
+      pattern: "/api/campaigns/:id/evidence/:eid/asset",
+      roles: ["buyer", "coordinator", "agent"],
+      scope: "campaigns:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const row = db
+          .prepare(
+            "SELECT * FROM evidence WHERE id = ? AND campaign_id = ?"
+          )
+          .get(params.eid!, params.id!) as EvidenceRow | undefined;
+        if (!row) {
+          return {
+            status: 404,
+            body: { error: { code: "not_found", message: "evidence not found" } },
+          };
+        }
+        const bytes = readFileSync(join(app.objectDir, row.payload_path));
+        return {
+          body: {
+            evidenceId: row.id,
+            payloadDigest: row.payload_digest,
+            assetBase64: bytes.toString("base64"),
+          },
+        };
+      },
+    },
+    {
       method: "GET",
       pattern: "/api/campaigns/:id/spends",
       roles: ["buyer", "agent"],
@@ -911,6 +970,43 @@ export function buildRoutes(app: AppContext): Route[] {
             publicToken: release.public_token,
             publicUrl: `/api/release/${release.public_token}`,
             report,
+          },
+        };
+      },
+    },
+    {
+      // Existing release, if published — lets the UI surface the export
+      // link after a rerender without re-POSTing.
+      method: "GET",
+      pattern: "/api/campaigns/:id/release",
+      roles: ["buyer", "agent"],
+      scope: "release:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        const row = db
+          .prepare("SELECT * FROM releases WHERE campaign_id = ?")
+          .get(params.id!) as
+          | {
+              id: string;
+              campaign_id: string;
+              public_token: string;
+              status: string;
+              created_at: string;
+            }
+          | undefined;
+        if (!row) {
+          return {
+            status: 404,
+            body: { error: { code: "not_found", message: "campaign not released" } },
+          };
+        }
+        return {
+          body: {
+            releaseId: row.id,
+            status: row.status,
+            publicToken: row.public_token,
+            publicUrl: `/api/release/${row.public_token}`,
+            releasedAt: row.created_at,
           },
         };
       },

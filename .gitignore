@@ -6,3 +6,7 @@ var/
 *.db-shm
 .devin-handoff/
 .DS_Store
+.pw-var/
+var/
+test-results/
+playwright-report/

@@ -91,10 +91,6 @@ export function createApp(opts: AppOptions): http.Server {
     const path = url.pathname;
 
     try {
-      if (req.method === "GET" && staticDir && !path.startsWith("/api")) {
-        return await serveStatic(staticDir, path, res);
-      }
-
       for (const route of compiled) {
         if (route.method !== req.method) continue;
         const m = route.regex.exec(path);
@@ -142,6 +138,12 @@ export function createApp(opts: AppOptions): http.Server {
           return res.end();
         }
         return sendJson(res, result.status ?? 200, result.body ?? { ok: true });
+      }
+
+      // Static files are a fallback for non-API GETs — routes (including
+      // the /r/:slug demo redirector) always win first.
+      if (req.method === "GET" && staticDir && !path.startsWith("/api")) {
+        return await serveStatic(staticDir, path, res);
       }
 
       sendJson(res, 404, { error: { code: "not_found", message: "no such route" } });
