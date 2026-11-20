@@ -860,7 +860,7 @@ function settlementCard(cid, b, refresh) {
     h("h3", { style: "margin-top:.8rem" }, "Order intents"),
     b.intents.length ? h("table", {},
       h("thead", {}, h("tr", {}, h("th", {}, "id"), h("th", {}, "amount"), h("th", {}, "payee"), h("th", {}, "state"), h("th", {}, "actions"))),
-      h("tbody", {}, b.intents.map((i) => h("tr", {},
+      h("tbody", {}, b.intents.map((i) => h("tr", { "data-intent-id": i.id },
         h("td", { class: "mono" }, short(i.id, 14)),
         h("td", {}, atoms(i.amountAtoms, i.token)),
         h("td", { class: "mono" }, i.recipient),
@@ -1122,9 +1122,14 @@ async function viewShop() {
       const expIn = h("input", { id: `qe-${qr.id}`, value: "2099-01-01T00:00:00.000Z" });
       const acctIn = h("input", { id: `qa-${qr.id}`, value: `acct_${s.actor.id.replace("act_", "")}` });
       const proofIn = h("textarea", { id: `qf-${qr.id}`, rows: "2", placeholder: "proof text/asset — bound by digest to the revision" });
-      card.append(h("details", {},
+      card.append(h("details", {
+          "data-rfq": qr.id,
+          "data-campaign": qr.campaignId,
+          "data-rev": qr.revisionId,
+        },
         h("summary", {}, `RFQ ${short(qr.id, 14)} · ${qr.dimensions} · qty ${qr.qty} · due ${qr.deadline}`),
-        h("p", { class: "mono small muted" }, `revision ${qr.revisionId}`),
+        h("p", { class: "mono small muted" },
+          `campaign ${qr.campaignId} · item ${qr.planItemId} · revision ${qr.revisionId}`),
         h("div", { class: "field-row" },
           h("div", {}, h("label", { for: `qp-${qr.id}` }, "Total price (atoms)"), priceIn),
           h("div", {}, h("label", { for: `qa-${qr.id}` }, "Payee account"), acctIn)),
@@ -1165,11 +1170,17 @@ async function viewShop() {
       const pidIn = h("input", { id: `jp-${j.id}`, placeholder: "placement id (from buyer board)" });
       const dckIn = h("input", { id: `jd-${j.id}`, value: `d_${Math.random().toString(36).slice(2, 8)}` });
       const revIn = h("input", { id: `jv-${j.id}`, placeholder: "revision id delivered" });
-      card.append(h("div", { class: "site-card" },
+      card.append(h("div", {
+          class: "site-card",
+          "data-job-id": j.id,
+          "data-campaign": j.campaignId,
+        },
         h("div", { class: "head" },
           h("b", {}, `job ${short(j.id, 14)} · ${atoms(j.amountAtoms, j.token)}`),
           chip(j.state)),
-        h("div", { class: "meta" }, h("span", { class: "mono" }, `payee ${j.recipient}`)),
+        h("div", { class: "meta" },
+          h("span", { class: "mono" }, `payee ${j.recipient}`),
+          h("span", { class: "mono" }, `campaign ${j.campaignId}`)),
         h("div", { class: "actions" },
           j.state === "REQUESTED" ? h("div", { class: "row" }, refIn,
             h("button", { class: "small", type: "button", onclick: async () => {

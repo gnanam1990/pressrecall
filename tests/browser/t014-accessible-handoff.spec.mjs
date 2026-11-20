@@ -30,10 +30,12 @@ test("T-014: full flow through normal screens, offline queue, fresh-context expo
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.locator("#actor-chip")).toContainText("buyer");
 
-  // ---- setup: campaign ----
-  await page.locator("#nc-name").fill("Fest launch reprint");
+  // ---- setup: campaign (unique name — consecutive runs share one DB) ----
+  const campaignName = `Fest launch reprint ${Date.now().toString(36)}`;
+  await page.locator("#nc-name").fill(campaignName);
   await page.getByRole("button", { name: "Create campaign" }).click();
-  await expect(page.getByRole("heading", { name: "Fest launch reprint" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: campaignName })).toBeVisible();
+  const cid = page.url().split("#/c/")[1];
 
   // ---- original + revised assets ----
   await publishRevision(page, {
@@ -91,11 +93,17 @@ test("T-014: full flow through normal screens, offline queue, fresh-context expo
 
   await actAs(page, "printer A");
   await expect(page.getByRole("heading", { name: /Print shop/ })).toBeVisible();
-  await page.locator("summary", { hasText: "RFQ" }).first().click();
-  await page.getByRole("button", { name: "Submit quote" }).click();
-  await page.locator("#" + (await page.locator("textarea[id^='qf-']").first().getAttribute("id")))
-    .fill("PROOF fest v2 — June 7 artwork approved for plate");
-  await page.getByRole("button", { name: "Upload proof" }).click();
+  // RFQs are global to the shop — pick the one for THIS campaign
+  const rfq = page.locator(`details[data-campaign="${cid}"][data-rfq]`);
+  await expect(rfq).toHaveCount(1);
+  await rfq.locator("summary").click();
+  // identical terms each run — quote_hash uniqueness is per RFQ (migration 11),
+  // so a repeat run quoting the same artwork+terms on a NEW RFQ must succeed
+  await rfq.getByRole("button", { name: "Submit quote" }).click();
+  await expect(page.locator("#toast")).toContainText("quote submitted");
+  await rfq.locator("textarea").fill("PROOF fest v2 — June 7 artwork approved for plate");
+  await rfq.getByRole("button", { name: "Upload proof" }).click();
+  await expect(page.locator("#toast")).toContainText("proof uploaded");
 
   await actAs(page, "buyer");
   await expect(page.getByText("Printer quotes")).toBeVisible({ timeout: 10000 });
@@ -109,12 +117,17 @@ test("T-014: full flow through normal screens, offline queue, fresh-context expo
   await page.getByText("Create order intent").click();
   await page.getByRole("button", { name: "Create intent" }).click();
   await expect(page.locator(".chip", { hasText: "REQUESTED" })).toBeVisible({ timeout: 10000 });
+  const intentId = await page
+    .locator("tr[data-intent-id]")
+    .first()
+    .getAttribute("data-intent-id");
 
   const placementId = await siteB.getAttribute("data-placement-id");
   const targetRevId = await siteB.getAttribute("data-target-rev");
 
   await actAs(page, "printer A");
-  const job = page.locator(".site-card").first();
+  const job = page.locator(`.site-card[data-job-id="${intentId}"]`);
+  await expect(job).toHaveCount(1);
   await job.getByRole("button", { name: "Reserve" }).click();
   await expect(job.locator(".chip", { hasText: "RESERVED" })).toBeVisible({ timeout: 10000 });
 
@@ -126,14 +139,14 @@ test("T-014: full flow through normal screens, offline queue, fresh-context expo
   await expect(spendRow.locator(".chip", { hasText: "CONFIRMED" })).toBeVisible({ timeout: 15000 });
   const txHashCell = await spendRow.locator("td").nth(2).textContent();
 
-  // ---- shop acceptance + delivery ----
+  // ---- shop acceptance + delivery (same intent, scoped by job id) ----
   await actAs(page, "printer A");
-  const job2 = page.locator(".site-card").first();
+  const job2 = page.locator(`.site-card[data-job-id="${intentId}"]`);
   await job2.getByRole("button", { name: "Accept job" }).click();
   await job2.getByText("Record delivery").click();
-  await page.locator(`input[id^='jp-']`).fill(placementId);
-  await page.locator(`input[id^='jv-']`).fill(targetRevId);
-  await page.getByRole("button", { name: "Deliver" }).click();
+  await job2.locator(`input[id^='jp-']`).fill(placementId);
+  await job2.locator(`input[id^='jv-']`).fill(targetRevId);
+  await job2.getByRole("button", { name: "Deliver" }).click();
 
   // ---- offline field photo: queues, survives reload, retries by client key ----
   await actAs(page, "coordinator");
