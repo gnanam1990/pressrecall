@@ -8,6 +8,8 @@ import { authenticate, requireRole, requireScope, type Actor, type Role } from "
 export interface RouteResult {
   status?: number;
   body?: unknown;
+  /** When set, respond 302 with this Location. */
+  redirect?: string;
 }
 
 export interface Ctx {
@@ -135,6 +137,10 @@ export function createApp(opts: AppOptions): http.Server {
           query: url.searchParams,
           body,
         });
+        if (result.redirect) {
+          res.writeHead(result.status ?? 302, { location: result.redirect });
+          return res.end();
+        }
         return sendJson(res, result.status ?? 200, result.body ?? { ok: true });
       }
 

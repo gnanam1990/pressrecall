@@ -110,4 +110,26 @@ CREATE TABLE auth_tokens (
 CREATE INDEX idx_auth_tokens_actor ON auth_tokens (actor_id);
 `,
   },
+  {
+    version: 3,
+    name: "redirects-and-ink-fields",
+    sql: `
+CREATE TABLE redirects (
+  slug TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  current_target TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+ALTER TABLE placements ADD COLUMN ink_fields TEXT NOT NULL DEFAULT '[]';
+`,
+  },
+  {
+    version: 4,
+    name: "redirect-managed-url",
+    sql: `
+ALTER TABLE redirects ADD COLUMN managed_url TEXT;
+`,
+  },
 ];
