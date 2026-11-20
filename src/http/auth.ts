@@ -61,7 +61,15 @@ export const ROLE_SCOPES: Record<Role, string[]> = {
     "release:read",
     "redirects:read",
   ],
-  printer: ["quotes:read", "quotes:write", "proofs:write", "jobs:read", "jobs:write"],
+  printer: [
+    "quotes:read",
+    "quotes:write",
+    "proofs:write",
+    "jobs:read",
+    "jobs:write",
+    "intents:reserve",
+    "fulfillment:write",
+  ],
   operator: ["campaigns:read", "redirects:write", "redirects:read"],
 };
 

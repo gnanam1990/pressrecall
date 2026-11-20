@@ -200,4 +200,102 @@ CREATE TABLE approvals (
 CREATE INDEX idx_approvals_campaign ON approvals (campaign_id);
 `,
   },
+  {
+    version: 6,
+    name: "settlement",
+    sql: `
+CREATE TABLE grants (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  campaign_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  max_amount_atoms INTEGER NOT NULL,
+  token TEXT NOT NULL,
+  network TEXT NOT NULL,
+  allowed_payees TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVOKED')),
+  granted_by TEXT NOT NULL,
+  revoked_by TEXT,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE order_intents (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  approval_id TEXT NOT NULL,
+  quote_request_id TEXT NOT NULL,
+  quote_hash TEXT NOT NULL,
+  client_key TEXT NOT NULL,
+  intent_digest TEXT NOT NULL,
+  shop_ref TEXT,
+  state TEXT NOT NULL CHECK (state IN ('REQUESTED','RESERVED','CONFIRMED','DELIVERED','DISPUTED')),
+  amount_atoms INTEGER NOT NULL,
+  token TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, client_key)
+);
+CREATE UNIQUE INDEX idx_order_intents_shopref ON order_intents (shop_ref) WHERE shop_ref IS NOT NULL;
+CREATE INDEX idx_order_intents_campaign ON order_intents (campaign_id);
+
+CREATE TABLE spends (
+  id TEXT PRIMARY KEY,
+  intent_id TEXT NOT NULL UNIQUE REFERENCES order_intents(id),
+  campaign_id TEXT NOT NULL,
+  network TEXT NOT NULL,
+  token TEXT NOT NULL,
+  amount_atoms INTEGER NOT NULL,
+  recipient TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  grant_id TEXT NOT NULL,
+  tx_hash TEXT,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','SUBMITTED','CONFIRMED','AMBIGUOUS','DEFINITIVELY_FAILED')),
+  funded_by TEXT NOT NULL DEFAULT 'team',
+  ledger_label TEXT NOT NULL DEFAULT 'SANDBOX',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE spend_receipts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  spend_id TEXT NOT NULL,
+  tx_hash TEXT NOT NULL,
+  raw TEXT NOT NULL,
+  observed_at TEXT NOT NULL,
+  UNIQUE (spend_id, tx_hash)
+);
+CREATE UNIQUE INDEX idx_spend_receipts_txhash ON spend_receipts (tx_hash);
+
+CREATE TABLE sandbox_ledger (
+  tx_hash TEXT PRIMARY KEY,
+  intent_key TEXT NOT NULL UNIQUE,
+  network TEXT NOT NULL,
+  token TEXT NOT NULL,
+  amount_atoms INTEGER NOT NULL,
+  from_account TEXT NOT NULL,
+  to_account TEXT NOT NULL,
+  funded_by TEXT NOT NULL,
+  block INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','DONE','FAILED')),
+  created_at TEXT NOT NULL
+);
+`,
+  },
+  {
+    version: 7,
+    name: "settlement-handles",
+    sql: `
+ALTER TABLE grants ADD COLUMN session_data TEXT;
+ALTER TABLE spends ADD COLUMN calls_id TEXT;
+`,
+  },
 ];
