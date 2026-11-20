@@ -1,6 +1,11 @@
 import { join } from "node:path";
 import { openDb } from "./db/connection.js";
 import { migrate } from "./db/migrate.js";
+import { seedDemoActors } from "./actors/demo.js";
+import {
+  assertLiveStartAllowed,
+  liveAdapterSelected,
+} from "./live-guard.js";
 import { createApp } from "./http/server.js";
 import { buildRoutes } from "./http/routes.js";
 import { SandboxChainAdapter } from "./chain/sandbox.js";
@@ -19,6 +24,19 @@ const db = openDb(dbPath);
 const applied = migrate(db);
 if (applied.length) {
   console.log(`applied migrations: ${applied.join(", ")}`);
+}
+
+// First launch on a fresh database seeds the documented local demo actors
+// so the browser sign-in works out of the box — SANDBOX MODE ONLY. Demo
+// credentials are public and must never exist alongside a real provider.
+const liveMode = liveAdapterSelected(process.env);
+if (!liveMode) {
+  const seeded = seedDemoActors(db);
+  if (seeded) {
+    console.log(
+      `seeded ${seeded} local demo actors — credentials documented in README`
+    );
+  }
 }
 
 /**
@@ -47,6 +65,15 @@ function buildChainAdapter(): SignerAdapter {
   return new AltanaAdapter({ tokenAddresses });
 }
 
+// Live mode refuses to start with public demo credentials or the
+// isolated-demo auth path present.
+try {
+  assertLiveStartAllowed(db, process.env);
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(1);
+}
+
 const server = createApp({
   db,
   routes: buildRoutes({
@@ -68,7 +95,10 @@ const server = createApp({
   demoAuth: process.env.PRESSRECALL_DEMO_AUTH === "1",
 });
 
-server.listen(port, () => {
-  console.log(`pressrecall listening on http://localhost:${port}`);
+// Local sandbox binds loopback by default; set PRESSRECALL_BIND to expose
+// the service (e.g. a LAN field demo) deliberately.
+const bind = process.env.PRESSRECALL_BIND ?? "127.0.0.1";
+server.listen(port, bind, () => {
+  console.log(`pressrecall listening on http://${bind}:${port}`);
   console.log(`db=${dbPath} objects=${objectDir}`);
 });

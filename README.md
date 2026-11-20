@@ -30,14 +30,80 @@ acceptance report.
 
 ```sh
 npm ci
-npm start           # builds, then serves API + web UI on http://localhost:4173
+npm start           # builds, then serves API + web UI on http://127.0.0.1:4173
 ```
+
+The server binds loopback (`127.0.0.1`) by default — set `PRESSRECALL_BIND`
+to expose it deliberately. On first launch against a fresh database it
+seeds the documented local demo actors so the browser sign-in works out
+of the box (sandbox mode only — see *Live mode* below).
 
 Run the pack test suite:
 
 ```sh
 npm test            # builds, then runs node --test over dist/tests
 ```
+
+## Browser demo
+
+Open `http://127.0.0.1:4173` and sign in — the demo actor picker prefills
+local credentials. Local demo actors (sandbox mode only):
+
+| Actor | Role | Secret |
+|---|---|---|
+| `act_buyer` | buyer | `sec_buyer` |
+| `act_agent` | agent | `sec_agent` |
+| `act_coord` | coordinator | `sec_coord` |
+| `act_ops` | operator | `sec_ops` |
+| `act_printer_a` | printer | `sec_printer_a` |
+| `act_printer_b` | printer | `sec_printer_b` |
+
+One browser can drive every role via **Switch actor** in the top bar. The
+numbered cards on a campaign workspace carry the full lifecycle:
+
+1. **Artwork** — publish the original and the revised asset (file or text;
+   a `redirectTarget` marks web-correctable content).
+2. **Sites** — add a physical site (ink fields) and/or a managed-redirect
+   site (slug). The operator registers the deployed redirect; a field
+   agent's *Scan live redirect* observes the real HTTP resolution under the
+   scoped allowlist — `GET /r/:slug` on this server is the demo operator
+   redirector.
+3. **Quotes** — send an RFQ, switch to a printer to submit a quote and
+   upload a bound proof, switch back to approve.
+4. **Payment** — grant a scoped session, create the intent, the shop
+   reserves, then execute. Labeled `SANDBOX` — simulated, not real money.
+5. **Delivery & evidence** — the shop accepts and delivers; a field upload
+   queues offline in `localStorage` and retries with the same client key
+   across reloads.
+6. **Release** — preview the report, release, and share the `/export.html`
+   client link — a redacted snapshot that opens with no sign-in.
+
+Fresh-context browser acceptance (Playwright):
+
+```sh
+npx playwright install chromium   # one-time browser download
+npm run test:browser              # builds, launches the app, runs tests/browser
+```
+
+## Live mode
+
+`PRESSRECALL_CHAIN_ADAPTER=altana` opts into the real provider path. The
+startup guard refuses to boot when it finds either:
+
+- `PRESSRECALL_DEMO_AUTH=1` — the isolated-demo actor-header path, or
+- documented demo credentials still present in the `actors` table.
+
+Demo actors are never seeded in live mode. Provision real actors with
+unique secrets, then sign in through `POST /api/auth/token`:
+
+```sh
+npm run build
+node scripts/provision-actor.mjs act_acme tnt_acme buyer 'long-random-secret'
+```
+
+Live spend additionally needs session material per grant (`sessionData`)
+and `PRESSRECALL_ALTANA_TOKENS`; without them every send denies as
+`NOT_CONFIGURED`.
 
 ## Architecture
 
@@ -60,8 +126,11 @@ npm test            # builds, then runs node --test over dist/tests
   implementation (see below).
 - `src/http/` — `node:http` router, scoped bearer-token auth, tenant
   isolation (cross-tenant = 404), JSON body bound (10 MB).
-- `web/` — static accessible UI: producer dashboard, site compare, shop
-  portal, field view (offline queue via `localStorage`), client release.
+- `web/` — static accessible UI: sign-in + actor switcher, campaign
+  workspace (numbered stage cards), site compare, print-shop board,
+  offline field queue (`localStorage`, client-key idempotent),
+  redacted client export. `tests/browser/` holds the fresh-context
+  Playwright acceptance (T-014).
 
 Roles: `buyer` (producer) approves proofs/quotes and grants/revokes wallet
 authority; `coordinator` supplies site evidence; `printer` sees only its own

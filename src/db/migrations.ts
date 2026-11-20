@@ -355,4 +355,38 @@ CREATE TABLE releases (
     name: "release-public-snapshot",
     sql: `ALTER TABLE releases ADD COLUMN public_report TEXT;`,
   },
+  {
+    // quote_hash stays the stable commercial hash (approvals bind to it),
+    // but the same printer legitimately submits identical terms to two
+    // different RFQs for identical artwork — uniqueness is per RFQ.
+    version: 11,
+    name: "quote-hash-unique-per-rfq",
+    sql: `
+CREATE TABLE quotes_new (
+  id TEXT PRIMARY KEY,
+  quote_request_id TEXT NOT NULL REFERENCES quote_requests(id),
+  campaign_id TEXT NOT NULL,
+  printer_id TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  revision_digest TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  qty INTEGER NOT NULL,
+  price_atoms INTEGER NOT NULL,
+  token TEXT NOT NULL,
+  network TEXT NOT NULL,
+  direction TEXT NOT NULL DEFAULT 'pay-printer',
+  dimensions TEXT NOT NULL,
+  deadline TEXT,
+  expires_at TEXT NOT NULL,
+  quote_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (quote_request_id, quote_hash)
+);
+INSERT INTO quotes_new SELECT * FROM quotes;
+DROP TABLE quotes;
+ALTER TABLE quotes_new RENAME TO quotes;
+CREATE INDEX idx_quotes_campaign ON quotes (campaign_id);
+CREATE INDEX idx_quotes_printer ON quotes (printer_id);
+`,
+  },
 ];
