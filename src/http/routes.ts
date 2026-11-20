@@ -48,6 +48,11 @@ import {
   type EvidenceRow,
 } from "../services/fulfillment.js";
 import {
+  buildReport,
+  publicBundle,
+  releaseCampaign,
+} from "../services/release.js";
+import {
   approvalEligible,
   approvalView,
   createApproval,
@@ -881,6 +886,55 @@ export function buildRoutes(app: AppContext): Route[] {
             })),
           },
         };
+      },
+    },
+    // ---- M06: release & acceptance report ----
+    {
+      method: "POST",
+      pattern: "/api/campaigns/:id/release",
+      roles: ["buyer"],
+      scope: "release:read",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const { release, report } = releaseCampaign(db, actor!, params.id!, {
+          allowExceptions: b.allowExceptions === true,
+        });
+        return {
+          status: 201,
+          body: {
+            releaseId: release.id,
+            status: release.status,
+            publicToken: release.public_token,
+            publicUrl: `/api/release/${release.public_token}`,
+            report,
+          },
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/campaigns/:id/report",
+      roles: ["buyer", "agent"],
+      scope: "release:read",
+      handler: ({ db, actor, params }) => {
+        getCampaign(db, actor!, params.id!);
+        return { body: buildReport(db, params.id!, "private") };
+      },
+    },
+    {
+      // Shareable redacted bundle — no auth (capability URL), public data only.
+      method: "GET",
+      pattern: "/api/release/:token",
+      public: true,
+      handler: ({ db, params }) => {
+        const bundle = publicBundle(db, params.token!);
+        if (!bundle) {
+          return {
+            status: 404,
+            body: { error: { code: "not_found", message: "release not found" } },
+          };
+        }
+        return { body: bundle };
       },
     },
     {

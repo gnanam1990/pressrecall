@@ -118,6 +118,104 @@ export interface ApiResult {
 }
 
 /**
+ * Full pipeline: campaign + revA→revB, placement observing revA, quote
+ * request, quote, proof, approval, grant, intent, shop reserve.
+ * Returns ids for the settlement/fulfillment/release tests.
+ */
+export async function pipeline(app: TestApp, opts?: {
+  priceAtoms?: number;
+  capAtoms?: number;
+  fundedBy?: string;
+  settle?: boolean;
+  /** Create through approval only — caller drives intents itself. */
+  noIntent?: boolean;
+}) {
+  const buyer = ACTORS.buyer.id;
+  const agent = ACTORS.agent.id;
+  const printer = ACTORS.printerA.id;
+  const c = await api(app, buyer, "POST", "/api/campaigns", {
+    name: "Fest",
+    budgetCapAtoms: opts?.capAtoms ?? 200000,
+  });
+  const cid = c.json.id as string;
+  const revA = await api(app, buyer, "POST", `/api/campaigns/${cid}/revisions`, {
+    assetText: "v1",
+    body: { eventDateText: "Saturday June 6" },
+  });
+  const revB = await api(app, buyer, "POST", `/api/campaigns/${cid}/revisions`, {
+    assetText: "v2",
+    body: { eventDateText: "Sunday June 7" },
+    parentId: revA.json.id,
+  });
+  const site = await api(app, buyer, "POST", `/api/campaigns/${cid}/placements`, {
+    siteCode: "B",
+    siteLabel: "Market St",
+    format: "A2",
+    inkFields: ["eventDateText"],
+    observedRevisionId: revA.json.id,
+  });
+  const pid = site.json.id as string;
+  const rfq = await api(app, agent, "POST", `/api/campaigns/${cid}/quote-requests`, {
+    planItemId: site.json.planItem.id,
+    revisionId: revB.json.id,
+    dimensions: "594x841mm",
+    deadline: "2026-12-03",
+    qty: 1,
+  });
+  const q = await api(app, printer, "POST", `/api/printer/quote-requests/${rfq.json.id}/quotes`, {
+    qty: 1,
+    priceAtoms: opts?.priceAtoms ?? 42000,
+    token: "USD",
+    network: "SANDBOX",
+    recipient: "acct_printer_a",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  });
+  const proof = await api(app, printer, "POST", `/api/printer/quote-requests/${rfq.json.id}/proofs`, {
+    assetText: "PROOF — revB",
+  });
+  const appr = await api(app, buyer, "POST", `/api/campaigns/${cid}/approvals`, {
+    quoteId: q.json.id,
+    proofId: proof.json.id,
+  });
+  if (opts?.noIntent) {
+    return {
+      cid, pid,
+      revA: revA.json, revB: revB.json,
+      approvalId: appr.json.id as string,
+      intentId: null as unknown as string,
+      spend: null,
+    };
+  }
+  await api(app, buyer, "POST", `/api/campaigns/${cid}/grants`, {
+    sessionId: `sess_${cid}`,
+    maxAmountAtoms: 500000,
+    token: "USD",
+    network: "SANDBOX",
+    allowedPayees: ["acct_printer_a"],
+  });
+  const intent = await api(app, agent, "POST", `/api/campaigns/${cid}/order-intents`, {
+    approvalId: appr.json.id,
+    clientKey: `ck_${cid}_${site.json.planItem.id}`,
+  });
+  await api(app, printer, "POST", `/api/order-intents/${intent.json.id}/reserve`, {
+    shopRef: `REF-${intent.json.id}`,
+  });
+  let spend: ApiResult | null = null;
+  if (opts?.settle) {
+    spend = await api(app, agent, "POST", `/api/order-intents/${intent.json.id}/execute`, {
+      fundedBy: opts?.fundedBy,
+    });
+  }
+  return {
+    cid, pid,
+    revA: revA.json, revB: revB.json,
+    approvalId: appr.json.id as string,
+    intentId: intent.json.id as string,
+    spend: spend?.json,
+  };
+}
+
+/**
  * Independent operator redirect service: a separate local HTTP server that
  * 302s to a mutable target — what an installed QR actually resolves to.
  */
