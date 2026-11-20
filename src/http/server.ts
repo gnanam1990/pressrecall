@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import type { Db } from "../db/connection.js";
 import { ApiError } from "../domain/errors.js";
-import { resolveActor, requireRole, type Actor, type Role } from "./auth.js";
+import { authenticate, requireRole, requireScope, type Actor, type Role } from "./auth.js";
 
 export interface RouteResult {
   status?: number;
@@ -12,7 +12,7 @@ export interface RouteResult {
 
 export interface Ctx {
   db: Db;
-  actor: Actor;
+  actor: Actor | null;
   params: Record<string, string>;
   query: URLSearchParams;
   body: unknown;
@@ -21,7 +21,12 @@ export interface Ctx {
 export interface Route {
   method: string;
   pattern: string;
+  /** Unauthenticated endpoint (e.g. health, token issuance). */
+  public?: boolean;
+  /** When set, the caller's actor role must be one of these. */
   roles?: Role[];
+  /** When set, the bearer token must carry this scope. Omit → unauthenticated. */
+  scope?: string;
   handler: (ctx: Ctx) => Promise<RouteResult> | RouteResult;
 }
 
@@ -29,7 +34,9 @@ interface CompiledRoute {
   method: string;
   regex: RegExp;
   keys: string[];
+  public?: boolean;
   roles?: Role[];
+  scope?: string;
   handler: Route["handler"];
 }
 
@@ -56,7 +63,9 @@ function compile(route: Route): CompiledRoute {
       "$"
   );
   const out: CompiledRoute = { method: route.method, regex, keys, handler: route.handler };
+  if (route.public) out.public = route.public;
   if (route.roles) out.roles = route.roles;
+  if (route.scope) out.scope = route.scope;
   return out;
 }
 
@@ -64,6 +73,11 @@ export interface AppOptions {
   db: Db;
   routes: Route[];
   staticDir?: string | undefined;
+  /**
+   * Isolated-demo auth: allows bare `x-actor-id` headers. Off by default;
+   * enable only for explicitly isolated demos (PRESSRECALL_DEMO_AUTH=1).
+   */
+  demoAuth?: boolean | undefined;
 }
 
 export function createApp(opts: AppOptions): http.Server {
@@ -89,8 +103,19 @@ export function createApp(opts: AppOptions): http.Server {
           params[k] = decodeURIComponent(m[i + 1] ?? "");
         });
 
-        const actor = resolveActor(opts.db, header(req, "x-actor-id"));
-        if (route.roles) requireRole(actor, ...route.roles);
+        let actor: Actor | null = null;
+        if (!route.public) {
+          actor = authenticate(
+            opts.db,
+            {
+              authorization: header(req, "authorization"),
+              actorId: header(req, "x-actor-id"),
+            },
+            opts.demoAuth === true
+          );
+          if (route.roles) requireRole(actor, ...route.roles);
+          if (route.scope) requireScope(actor, route.scope);
+        }
 
         const raw = await readBody(req);
         let body: unknown = undefined;

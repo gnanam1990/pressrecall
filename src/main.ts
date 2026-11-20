@@ -21,6 +21,8 @@ const server = createApp({
   db,
   routes: buildRoutes({ objectDir }),
   staticDir: webDir,
+  // Isolated-demo auth ONLY when explicitly requested; never default.
+  demoAuth: process.env.PRESSRECALL_DEMO_AUTH === "1",
 });
 
 server.listen(port, () => {

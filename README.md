@@ -54,8 +54,8 @@ npm test            # builds, then runs node --test over dist/tests
   default local ledger (labeled `SANDBOX`, deterministic tx hashes, fault
   injection for ambiguity tests). `AltanaAdapter` is gated and returns
   `NOT_CONFIGURED` without real credentials.
-- `src/http/` — `node:http` router, actor/role resolution (`x-actor-id`),
-  tenant isolation (cross-tenant = 404), JSON body bound (10 MB).
+- `src/http/` — `node:http` router, scoped bearer-token auth, tenant
+  isolation (cross-tenant = 404), JSON body bound (10 MB).
 - `web/` — static accessible UI: producer dashboard, site compare, shop
   portal, field view (offline queue via `localStorage`), client release.
 
@@ -63,6 +63,25 @@ Roles: `buyer` (producer) approves proofs/quotes and grants/revokes wallet
 authority; `coordinator` supplies site evidence; `printer` sees only its own
 quotes/orders; `agent` evaluates plans and executes within grant scope;
 `operator` controls managed redirects.
+
+## Auth
+
+Tenant routes require `Authorization: Bearer prt_…` scoped tokens. Issue one
+with the actor's local secret:
+
+```sh
+curl -X POST localhost:4173/api/auth/token \
+  -H 'content-type: application/json' \
+  -d '{"actorId":"act_buyer","secret":"sec_buyer"}'
+```
+
+Scopes are role-capped (`src/http/auth.ts` → `ROLE_SCOPES`); requesting a
+scope outside the role is refused at issuance. `POST /api/auth/revoke`
+revokes a token immediately; expired tokens are rejected at use time.
+
+A bare `x-actor-id` header is **rejected** everywhere by default. It resolves
+only when the server is started with `PRESSRECALL_DEMO_AUTH=1`, an explicit
+isolated-demo escape hatch — do not use it for shared or pilot deployments.
 
 ## Honest boundaries
 

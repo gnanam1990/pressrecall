@@ -1,14 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Route } from "./server.js";
-import { badRequest, notFound } from "../domain/errors.js";
+import { mintToken, revokeToken } from "./auth.js";
 import {
   createCampaign,
   createPlacement,
   getCampaign,
   getPlacement,
   getRevision,
-  latestRevision,
   placementView,
   publishRevision,
   recordObservation,
@@ -25,11 +24,62 @@ export function buildRoutes(app: AppContext): Route[] {
   return [
     {
       method: "POST",
+      pattern: "/api/auth/token",
+      public: true,
+      handler: ({ db, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const { token, actor } = mintToken(db, {
+          actorId: String(b.actorId ?? ""),
+          secret: String(b.secret ?? ""),
+          scopes: Array.isArray(b.scopes)
+            ? (b.scopes as unknown[]).map(String)
+            : undefined,
+          expiresAt: b.expiresAt ? String(b.expiresAt) : undefined,
+        });
+        return {
+          status: 201,
+          body: {
+            token,
+            actor: {
+              id: actor.id,
+              role: actor.role,
+              tenantId: actor.tenantId,
+              scopes: actor.scopes,
+            },
+          },
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/auth/revoke",
+      handler: ({ db, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        revokeToken(db, String(b.token ?? ""));
+        return { body: { revoked: true } };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/auth/me",
+      handler: ({ actor }) => ({
+        body: {
+          id: actor!.id,
+          role: actor!.role,
+          tenantId: actor!.tenantId,
+          displayName: actor!.displayName,
+          scopes: actor!.scopes,
+        },
+      }),
+    },
+    {
+      method: "POST",
       pattern: "/api/campaigns",
       roles: ["buyer", "agent"],
+      scope: "campaigns:write",
       handler: ({ db, actor, body }) => {
         const b = (body ?? {}) as Record<string, unknown>;
-        const campaign = createCampaign(db, actor, {
+        const campaign = createCampaign(db, actor!, {
           name: String(b.name ?? ""),
           budgetCapAtoms: numOr(b.budgetCapAtoms),
           budgetToken: b.budgetToken ? String(b.budgetToken) : undefined,
@@ -41,13 +91,14 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "GET",
       pattern: "/api/campaigns",
       roles: ["buyer", "coordinator", "agent", "operator"],
+      scope: "campaigns:read",
       handler: ({ db, actor }) => {
         const rows = db
           .prepare("SELECT * FROM campaigns WHERE tenant_id = ? ORDER BY created_at")
-          .all(actor.tenantId) as { id: string }[];
+          .all(actor!.tenantId) as unknown as { id: string }[];
         return {
           body: {
-            campaigns: rows.map((r) => campaignView(getCampaign(db, actor, r.id))),
+            campaigns: rows.map((r) => campaignView(getCampaign(db, actor!, r.id))),
           },
         };
       },
@@ -56,17 +107,19 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "GET",
       pattern: "/api/campaigns/:id",
       roles: ["buyer", "coordinator", "agent", "operator"],
+      scope: "campaigns:read",
       handler: ({ db, actor, params }) => ({
-        body: campaignView(getCampaign(db, actor, params.id!)),
+        body: campaignView(getCampaign(db, actor!, params.id!)),
       }),
     },
     {
       method: "POST",
       pattern: "/api/campaigns/:id/revisions",
       roles: ["buyer"],
+      scope: "revisions:write",
       handler: ({ db, actor, params, body }) => {
         const b = (body ?? {}) as Record<string, unknown>;
-        const rev = publishRevision(db, actor, app.objectDir, params.id!, {
+        const rev = publishRevision(db, actor!, app.objectDir, params.id!, {
           assetText: b.assetText !== undefined ? String(b.assetText) : undefined,
           assetBase64:
             b.assetBase64 !== undefined ? String(b.assetBase64) : undefined,
@@ -87,8 +140,9 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "GET",
       pattern: "/api/campaigns/:id/revisions",
       roles: ["buyer", "coordinator", "agent", "operator"],
+      scope: "campaigns:read",
       handler: ({ db, actor, params }) => {
-        getCampaign(db, actor, params.id!);
+        getCampaign(db, actor!, params.id!);
         const rows = db
           .prepare(
             "SELECT * FROM revisions WHERE campaign_id = ? ORDER BY seq"
@@ -101,8 +155,9 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "GET",
       pattern: "/api/campaigns/:id/revisions/:rid",
       roles: ["buyer", "coordinator", "agent", "operator"],
+      scope: "campaigns:read",
       handler: ({ db, actor, params }) => {
-        getCampaign(db, actor, params.id!);
+        getCampaign(db, actor!, params.id!);
         return { body: revisionView(getRevision(db, params.id!, params.rid!)) };
       },
     },
@@ -110,8 +165,9 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "GET",
       pattern: "/api/campaigns/:id/revisions/:rid/asset",
       roles: ["buyer", "coordinator", "agent", "operator"],
+      scope: "campaigns:read",
       handler: ({ db, actor, params }) => {
-        getCampaign(db, actor, params.id!);
+        getCampaign(db, actor!, params.id!);
         const rev = getRevision(db, params.id!, params.rid!);
         const bytes = readFileSync(join(app.objectDir, rev.asset_path));
         return {
@@ -127,9 +183,10 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "POST",
       pattern: "/api/campaigns/:id/placements",
       roles: ["buyer", "agent"],
+      scope: "placements:write",
       handler: ({ db, actor, params, body }) => {
         const b = (body ?? {}) as Record<string, unknown>;
-        const { placement, planItem } = createPlacement(db, actor, params.id!, {
+        const { placement } = createPlacement(db, actor!, params.id!, {
           siteCode: String(b.siteCode ?? ""),
           siteLabel: String(b.siteLabel ?? ""),
           format: String(b.format ?? ""),
@@ -142,7 +199,6 @@ export function buildRoutes(app: AppContext): Route[] {
           observedAt: b.observedAt ? String(b.observedAt) : undefined,
           deadline: b.deadline ? String(b.deadline) : undefined,
         });
-        void planItem;
         return { status: 201, body: placementView(db, placement) };
       },
     },
@@ -150,8 +206,9 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "GET",
       pattern: "/api/campaigns/:id/placements",
       roles: ["buyer", "coordinator", "agent", "operator"],
+      scope: "campaigns:read",
       handler: ({ db, actor, params }) => {
-        getCampaign(db, actor, params.id!);
+        getCampaign(db, actor!, params.id!);
         const rows = db
           .prepare(
             "SELECT * FROM placements WHERE campaign_id = ? ORDER BY site_code"
@@ -166,8 +223,9 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "GET",
       pattern: "/api/campaigns/:id/placements/:pid",
       roles: ["buyer", "coordinator", "agent", "operator"],
+      scope: "campaigns:read",
       handler: ({ db, actor, params }) => {
-        getCampaign(db, actor, params.id!);
+        getCampaign(db, actor!, params.id!);
         const p = getPlacement(db, params.id!, params.pid!);
         return { body: placementView(db, p) };
       },
@@ -176,9 +234,10 @@ export function buildRoutes(app: AppContext): Route[] {
       method: "POST",
       pattern: "/api/campaigns/:id/placements/:pid/observations",
       roles: ["buyer", "coordinator", "agent"],
+      scope: "observations:write",
       handler: ({ db, actor, params, body }) => {
         const b = (body ?? {}) as Record<string, unknown>;
-        const { planItem } = recordObservation(db, actor, params.id!, params.pid!, {
+        recordObservation(db, actor!, params.id!, params.pid!, {
           observedRevisionId: b.observedRevisionId
             ? String(b.observedRevisionId)
             : undefined,
@@ -186,17 +245,16 @@ export function buildRoutes(app: AppContext): Route[] {
           observedAt: b.observedAt ? String(b.observedAt) : undefined,
         });
         const p = getPlacement(db, params.id!, params.pid!);
-        const v = placementView(db, p);
-        void planItem;
-        return { body: v };
+        return { body: placementView(db, p) };
       },
     },
     {
       method: "GET",
       pattern: "/api/campaigns/:id/verification-queue",
       roles: ["buyer", "coordinator", "agent"],
+      scope: "campaigns:read",
       handler: ({ db, actor, params }) => {
-        getCampaign(db, actor, params.id!);
+        getCampaign(db, actor!, params.id!);
         const rows = db
           .prepare(
             `SELECT p.* FROM placements p
@@ -215,6 +273,7 @@ export function buildRoutes(app: AppContext): Route[] {
     {
       method: "GET",
       pattern: "/api/health",
+      public: true,
       handler: () => ({ body: { status: "ok" } }),
     },
   ];

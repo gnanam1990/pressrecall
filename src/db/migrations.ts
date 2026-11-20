@@ -93,4 +93,21 @@ CREATE TABLE events (
 CREATE INDEX idx_events_campaign ON events (campaign_id, seq);
 `,
   },
+  {
+    version: 2,
+    name: "scoped-auth-tokens",
+    sql: `
+ALTER TABLE actors ADD COLUMN secret TEXT;
+
+CREATE TABLE auth_tokens (
+  token TEXT PRIMARY KEY,
+  actor_id TEXT NOT NULL REFERENCES actors(id),
+  scopes TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  revoked_at TEXT
+);
+CREATE INDEX idx_auth_tokens_actor ON auth_tokens (actor_id);
+`,
+  },
 ];
