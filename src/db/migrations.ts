@@ -298,4 +298,41 @@ ALTER TABLE grants ADD COLUMN session_data TEXT;
 ALTER TABLE spends ADD COLUMN calls_id TEXT;
 `,
   },
+  {
+    version: 8,
+    name: "fulfillment-evidence",
+    sql: `
+CREATE TABLE deliveries (
+  id TEXT PRIMARY KEY,
+  intent_id TEXT NOT NULL REFERENCES order_intents(id),
+  campaign_id TEXT NOT NULL,
+  placement_id TEXT NOT NULL REFERENCES placements(id),
+  qty INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,
+  revision_digest TEXT,
+  shipment_ref TEXT,
+  client_key TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, client_key)
+);
+CREATE INDEX idx_deliveries_placement ON deliveries (placement_id);
+
+CREATE TABLE evidence (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  placement_id TEXT NOT NULL REFERENCES placements(id),
+  client_key TEXT NOT NULL,
+  payload_digest TEXT NOT NULL,
+  payload_path TEXT NOT NULL,
+  revision_digest_seen TEXT,
+  captured_at TEXT,
+  note TEXT,
+  uploader_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (campaign_id, client_key)
+);
+CREATE INDEX idx_evidence_placement ON evidence (placement_id);
+`,
+  },
 ];
