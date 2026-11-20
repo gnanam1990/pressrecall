@@ -15,6 +15,11 @@ import {
   type PlacementRow,
   type RevisionRow,
 } from "../services/campaigns.js";
+import {
+  evaluateCampaign,
+  recordScan,
+  upsertRedirect,
+} from "../services/planner.js";
 
 export interface AppContext {
   objectDir: string;
@@ -198,6 +203,9 @@ export function buildRoutes(app: AppContext): Route[] {
           observedDigest: b.observedDigest ? String(b.observedDigest) : undefined,
           observedAt: b.observedAt ? String(b.observedAt) : undefined,
           deadline: b.deadline ? String(b.deadline) : undefined,
+          inkFields: Array.isArray(b.inkFields)
+            ? (b.inkFields as unknown[]).map(String)
+            : undefined,
         });
         return { status: 201, body: placementView(db, placement) };
       },
@@ -266,6 +274,87 @@ export function buildRoutes(app: AppContext): Route[] {
         return {
           body: {
             queue: rows.map((p) => placementView(db, p)),
+          },
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/campaigns/:id/plans/evaluate",
+      roles: ["agent"],
+      scope: "plans:evaluate",
+      handler: ({ db, actor, params }) => ({
+        body: { results: evaluateCampaign(db, actor!, params.id!) },
+      }),
+    },
+    {
+      method: "POST",
+      pattern: "/api/campaigns/:id/plan-items/:piid/scan",
+      roles: ["agent", "coordinator"],
+      scope: "observations:write",
+      handler: ({ db, actor, params, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const item = recordScan(db, actor!, params.id!, params.piid!, {
+          resolvedTarget: String(b.resolvedTarget ?? ""),
+        });
+        return {
+          body: {
+            id: item.id,
+            state: item.state,
+            reason: item.reason,
+            decidedBy: item.decided_by,
+            decidedAt: item.decided_at,
+            evidence: item.evidence ? JSON.parse(item.evidence) : null,
+          },
+        };
+      },
+    },
+    {
+      method: "POST",
+      pattern: "/api/redirects",
+      roles: ["operator"],
+      scope: "redirects:write",
+      handler: ({ db, actor, body }) => {
+        const b = (body ?? {}) as Record<string, unknown>;
+        const row = upsertRedirect(db, actor!, {
+          slug: String(b.slug ?? ""),
+          target: String(b.target ?? ""),
+        });
+        return {
+          status: 201,
+          body: {
+            slug: row.slug,
+            currentTarget: row.current_target,
+            updatedBy: row.updated_by,
+            updatedAt: row.updated_at,
+          },
+        };
+      },
+    },
+    {
+      method: "GET",
+      pattern: "/api/redirects/:slug",
+      scope: "redirects:read",
+      handler: ({ db, actor, params }) => {
+        const row = db
+          .prepare("SELECT * FROM redirects WHERE slug = ? AND tenant_id = ?")
+          .get(params.slug!, actor!.tenantId) as
+          | {
+              slug: string;
+              current_target: string;
+              updated_by: string;
+              updated_at: string;
+            }
+          | undefined;
+        if (!row) {
+          return { status: 404, body: { error: { code: "not_found", message: "redirect not found" } } };
+        }
+        return {
+          body: {
+            slug: row.slug,
+            currentTarget: row.current_target,
+            updatedBy: row.updated_by,
+            updatedAt: row.updated_at,
           },
         };
       },

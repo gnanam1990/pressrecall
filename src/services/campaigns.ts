@@ -41,6 +41,7 @@ export interface PlacementRow {
   format: string;
   managed_redirect: number;
   redirect_slug: string | null;
+  ink_fields: string;
   observed_revision_id: string | null;
   observed_revision_digest: string | null;
   observed_at: string | null;
@@ -283,6 +284,7 @@ export interface PlacementInput {
   observedDigest?: string;
   observedAt?: string;
   deadline?: string;
+  inkFields?: string[];
 }
 
 /**
@@ -311,9 +313,9 @@ export function createPlacement(
   db.prepare(
     `INSERT INTO placements
        (id, campaign_id, site_code, site_label, format, managed_redirect,
-        redirect_slug, observed_revision_id, observed_revision_digest,
+        redirect_slug, ink_fields, observed_revision_id, observed_revision_digest,
         observed_at, deadline, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     placementId,
     campaignId,
@@ -322,6 +324,7 @@ export function createPlacement(
     input.format,
     input.managedRedirect ? 1 : 0,
     input.redirectSlug ?? null,
+    JSON.stringify(input.inkFields ?? []),
     observed.revisionId,
     observed.digest,
     input.observedAt ?? nowIso(),
@@ -486,6 +489,7 @@ export function placementView(
     format: placement.format,
     managedRedirect: !!placement.managed_redirect,
     redirectSlug: placement.redirect_slug,
+    inkFields: JSON.parse(placement.ink_fields ?? "[]"),
     observedRevisionId: placement.observed_revision_id,
     observedRevisionDigest: placement.observed_revision_digest,
     observedAt: placement.observed_at,

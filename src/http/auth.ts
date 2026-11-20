@@ -42,6 +42,7 @@ export const ROLE_SCOPES: Record<Role, string[]> = {
     "release:read",
     "exports:read",
     "grants:write",
+    "redirects:read",
   ],
   coordinator: [
     "campaigns:read",
@@ -56,9 +57,10 @@ export const ROLE_SCOPES: Record<Role, string[]> = {
     "plans:evaluate",
     "intents:write",
     "release:read",
+    "redirects:read",
   ],
   printer: ["quotes:read", "quotes:write", "proofs:write", "jobs:read", "jobs:write"],
-  operator: ["campaigns:read", "redirects:write"],
+  operator: ["campaigns:read", "redirects:write", "redirects:read"],
 };
 
 function actorFrom(row: ActorRow, scopes: string[]): Actor {
